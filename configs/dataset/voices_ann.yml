@@ -1,0 +1,4 @@
+dset_name: voices_ann
+clip_length: 1
+train_path: data/voices_ann/voices_ann_train_release.jsonl
+eval_path: data/voices_ann/voices_ann_val_release.jsonl
