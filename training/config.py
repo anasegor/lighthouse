@@ -122,7 +122,7 @@ class BaseOptions(object):
                 t_feat_dir = f'features/{self.dataset}/clip_text'
 
             elif self.feature == 'clap':
-                a_feat_dirs = [f'/content/drive/MyDrive/temp//clap']
+                a_feat_dirs = [f'/content/drive/MyDrive/temp/clap']
                 a_feat_types = self.opt.a_feat_types
                 t_feat_dir = f'/content/drive/MyDrive/clap_text2/clap_text'
 
