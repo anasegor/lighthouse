@@ -125,7 +125,8 @@ def train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i):
     timer_dataloading = time.time()
     for batch_idx, batch in tqdm(enumerate(train_loader),
                                  desc="Training Iteration",
-                                 total=num_training_examples):
+                                 total=num_training_examples,
+                                 disable=True):
         model_inputs, targets = batch_input_fn(batch[1], opt.device)
         
         if opt.model_name == 'taskweave':

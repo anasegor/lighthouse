@@ -193,7 +193,7 @@ def compute_mr_results(epoch_i, model, eval_loader, opt, criterion=None):
     loss_meters = defaultdict(AverageMeter)
 
     mr_res = []
-    for batch in tqdm(eval_loader, desc="compute st ed scores"):
+    for batch in tqdm(eval_loader, desc="compute st ed scores", disable=True):
         query_meta = batch[0]
         model_inputs, targets = batch_input_fn(batch[1], opt.device)
 
