@@ -76,14 +76,15 @@ import random
 
 logger = logging.getLogger(__name__)
 
+
 class AudioMomentMix(nn.Module):
     def __init__(
         self,
-        epsilon_cut: float = 5.0,      # длина под‑сегмента в секундах
+        epsilon_cut: float = 5.0,  # длина под‑сегмента в секундах
         prob: float = 0.5,
         use_background_mix: bool = True,
         min_moment_length: int = 1,
-        clip_len: float = 1.0          # длительность одного аудио‑шага в секундах
+        clip_len: float = 1.0,  # длительность одного аудио‑шага в секундах
     ):
         super().__init__()
         self.epsilon_cut = epsilon_cut
@@ -95,11 +96,11 @@ class AudioMomentMix(nn.Module):
     def forward(
         self,
         audio_features: torch.Tensor,  # [T, D]
-        text_features: torch.Tensor,   # [D']
+        text_features: torch.Tensor,  # [D']
         moment_start: int,
         moment_end: int,
         video_id: str,
-        all_videos_data: Optional[Dict[str, torch.Tensor]] = None
+        all_videos_data: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
         if torch.rand(1).item() > self.prob:
             return audio_features, text_features, [(moment_start, moment_end)]
@@ -110,7 +111,11 @@ class AudioMomentMix(nn.Module):
         )
 
         # Stage 2: BackgroundMix
-        if self.use_background_mix and all_videos_data is not None and len(all_videos_data) > 1:
+        if (
+            self.use_background_mix
+            and all_videos_data is not None
+            and len(all_videos_data) > 1
+        ):
             audio_final = self._background_mix(
                 audio_fg_mix, fg_ranges, video_id, all_videos_data
             )
@@ -119,10 +124,7 @@ class AudioMomentMix(nn.Module):
             return audio_fg_mix, text_features, fg_ranges
 
     def _foreground_mix(
-        self,
-        audio_features: torch.Tensor,
-        moment_start: int,
-        moment_end: int
+        self, audio_features: torch.Tensor, moment_start: int, moment_end: int
     ) -> Tuple[torch.Tensor, List[Tuple[int, int]]]:
         T, D = audio_features.shape
         fg_length = moment_end - moment_start
@@ -149,8 +151,12 @@ class AudioMomentMix(nn.Module):
         bg_subsegments = [seg for seg in bg_subsegments if seg.shape[0] > 0]
         # дополняем до нужного количества
         while len(bg_subsegments) < n_fg + 1:
-            bg_subsegments.append(torch.zeros(0, D, dtype=audio_features.dtype, device=audio_features.device))
-        bg_subsegments = bg_subsegments[:n_fg + 1]
+            bg_subsegments.append(
+                torch.zeros(
+                    0, D, dtype=audio_features.dtype, device=audio_features.device
+                )
+            )
+        bg_subsegments = bg_subsegments[: n_fg + 1]
 
         # Перемешиваем
         fg_perm = torch.randperm(n_fg)
@@ -184,7 +190,7 @@ class AudioMomentMix(nn.Module):
         offset = 0
         fg_ranges = []
         for seg in mixed:
-            if seg in fg_shuffled:
+            if any(seg is fg for fg in fg_shuffled):
                 fg_ranges.append((offset, offset + seg.shape[0]))
             offset += seg.shape[0]
 
@@ -196,10 +202,10 @@ class AudioMomentMix(nn.Module):
 
     def _background_mix(
         self,
-        audio_features: torch.Tensor,    # [T, D]
-        fg_ranges: List[Tuple[int, int]],# список (start, end) – границы foreground
+        audio_features: torch.Tensor,  # [T, D]
+        fg_ranges: List[Tuple[int, int]],  # список (start, end) – границы foreground
         video_id: str,
-        all_videos_data: Dict[str, torch.Tensor]   # {vid: tensor}
+        all_videos_data: Dict[str, torch.Tensor],  # {vid: tensor}
     ) -> torch.Tensor:
         """
         Заменяет все участки аудио, НЕ входящие ни в один из fg_ranges,
@@ -214,7 +220,7 @@ class AudioMomentMix(nn.Module):
         fg_mask = torch.zeros(T, dtype=torch.bool, device=audio_features.device)
         for s, e in fg_ranges:
             if s < e:
-                fg_mask[s:min(e, T)] = True
+                fg_mask[s : min(e, T)] = True
 
         # выбираем одно другое видео
         other_vid = random.choice(other_videos)
@@ -244,7 +250,7 @@ class AudioMomentMix(nn.Module):
                 continue
             if T_other > seg_len:
                 crop_start = torch.randint(0, T_other - seg_len + 1, (1,)).item()
-                cropped = other_audio[crop_start:crop_start + seg_len]
+                cropped = other_audio[crop_start : crop_start + seg_len]
             else:
                 cropped = other_audio
                 if cropped.shape[0] < seg_len:
@@ -254,7 +260,8 @@ class AudioMomentMix(nn.Module):
             audio_bgmix[bg_start:bg_end] = cropped.to(audio_bgmix.device)
 
         return audio_bgmix
-    
+
+
 class Castella_StartEndDataset(Dataset):
     """One line in data loaded from data_path."
     {
@@ -286,13 +293,11 @@ class Castella_StartEndDataset(Dataset):
         max_windows=5,
         span_loss_type="l1",
         load_labels=True,
-
         use_moment_mix=True,
         moment_mix_epsilon=5.0,
         moment_mix_prob=0.5,
-        moment_mix_bg=True,    
+        moment_mix_bg=True,
         moment_mix_min_len=1,
-
     ):
         self.dset_name = dset_name
         self.domain = domain
@@ -319,14 +324,12 @@ class Castella_StartEndDataset(Dataset):
         self.max_a_l = max_a_l
 
         self.ctx_mode = ctx_mode
-        self.use_tef = "tef" in ctx_mode
         self.clip_len = clip_len
         self.max_windows = max_windows  # maximum number of windows to use as labels
         self.span_loss_type = span_loss_type
         self.load_labels = load_labels
 
-
-         # ==== MomentMix integration ====
+        # ==== MomentMix integration ====
         self.use_moment_mix = use_moment_mix
         if self.use_moment_mix:
             self.moment_mix = AudioMomentMix(
@@ -334,7 +337,7 @@ class Castella_StartEndDataset(Dataset):
                 prob=moment_mix_prob,
                 use_background_mix=moment_mix_bg,
                 min_moment_length=moment_mix_min_len,
-                clip_len=clip_len
+                clip_len=clip_len,
             )
             self._all_audio_cache = None
         else:
@@ -358,7 +361,7 @@ class Castella_StartEndDataset(Dataset):
             cache[vid] = a_feat
         self._all_audio_cache = cache
         return cache
-    
+
     def __len__(self):
         return len(self.data)
 
@@ -384,19 +387,22 @@ class Castella_StartEndDataset(Dataset):
         if self.use_moment_mix and len(meta.get("relevant_windows", [])) > 0:
 
             windows = meta["relevant_windows"]
-            if len(windows) != 1:
-                return
-            # if len(windows) == 1:
-            chosen_win = windows[0]
-            # else:
-                # chosen_win = random.choice(windows)
+
+            if len(windows) == 1:
+                chosen_win = windows[0]
+            else:
+                chosen_win = random.choice(windows)
             st_sec, ed_sec = chosen_win
             clip_start = int(st_sec / self.clip_len)
             clip_end = int(ed_sec / self.clip_len)
             clip_start = max(0, min(clip_start, ctx_l - 1))
             clip_end = max(clip_start + 1, min(clip_end, ctx_l))  # хотя бы 1
 
-            all_audio = self._load_all_audio_features() if self.moment_mix.use_background_mix else None
+            all_audio = (
+                self._load_all_audio_features()
+                if self.moment_mix.use_background_mix
+                else None
+            )
 
             # Применяем MomentMix
             audio_feat_mixed, _, fg_ranges = self.moment_mix(
@@ -405,7 +411,7 @@ class Castella_StartEndDataset(Dataset):
                 clip_start,
                 clip_end,
                 video_id=meta["vid"],
-                all_videos_data=all_audio
+                all_videos_data=all_audio,
             )
             audio_feat = audio_feat_mixed
 
@@ -418,16 +424,17 @@ class Castella_StartEndDataset(Dataset):
 
         model_inputs["audio_feat"] = audio_feat
 
-        if self.use_tef:
-            tef_st = torch.arange(0, ctx_l, 1.0) / ctx_l
-            tef_ed = tef_st + 1.0 / ctx_l
-            tef = torch.stack([tef_st, tef_ed], dim=1)  # (Lv, 2)
-            model_inputs["video_feat"] = tef
-
         if self.load_labels:
-            model_inputs["span_labels"] = self.get_span_labels(meta["relevant_windows"], ctx_l)
-            model_inputs["saliency_pos_labels"], model_inputs["saliency_neg_labels"], model_inputs["saliency_all_labels"] = \
-                        self.get_saliency_labels_sub_as_query(meta["relevant_windows"][0], ctx_l)
+            model_inputs["span_labels"] = self.get_span_labels(
+                meta["relevant_windows"], ctx_l
+            )
+            (
+                model_inputs["saliency_pos_labels"],
+                model_inputs["saliency_neg_labels"],
+                model_inputs["saliency_all_labels"],
+            ) = self.get_saliency_labels_sub_as_query(
+                meta["relevant_windows"][0], ctx_l
+            )
 
         return dict(meta=meta, model_inputs=model_inputs)
 
@@ -755,5 +762,3 @@ def prepare_batch_inputs(batched_model_inputs, device, non_blocking=False):
 
     targets = None if len(targets) == 0 else targets
     return model_inputs, targets
-
-
