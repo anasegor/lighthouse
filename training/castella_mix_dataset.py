@@ -373,7 +373,7 @@ class Castella_StartEndDataset(Dataset):
         ctx_l = self.max_v_l
 
         audio_feat = self._get_audio_feat_by_vid(meta["vid"])
-        ctx_l_a = len(model_inputs["audio_feat"])
+        ctx_l_a = len(audio_feat)
         # Sometimes, audio features is longer than video features because the length of video is not necessarily 2:30.
         if ctx_l < ctx_l_a:
             model_inputs["audio_feat"] = model_inputs["audio_feat"][:ctx_l]
