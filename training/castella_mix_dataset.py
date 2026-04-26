@@ -334,7 +334,7 @@ class Castella_StartEndDataset(Dataset):
                 prob=moment_mix_prob,
                 use_background_mix=moment_mix_bg,
                 min_moment_length=moment_mix_min_len,
-                clip_length=clip_len
+                clip_len=clip_len
             )
             self._all_audio_cache = None
         else:
