@@ -102,7 +102,7 @@ class AudioMomentMix(nn.Module):
         all_videos_data: Optional[Dict[str, torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
         if torch.rand(1).item() > self.prob:
-            return audio_features, text_features, moment_start, moment_end
+            return audio_features, text_features, [(moment_start, moment_end)]
 
         # Stage 1: ForegroundMix
         audio_fg_mix, fg_ranges = self._foreground_mix(
@@ -376,7 +376,7 @@ class Castella_StartEndDataset(Dataset):
         ctx_l_a = len(audio_feat)
         # Sometimes, audio features is longer than video features because the length of video is not necessarily 2:30.
         if ctx_l < ctx_l_a:
-            model_inputs["audio_feat"] = model_inputs["audio_feat"][:ctx_l]
+            audio_feat = audio_feat[:ctx_l]
             ctx_l_a = ctx_l
         elif ctx_l > ctx_l_a:
             ctx_l = ctx_l_a
