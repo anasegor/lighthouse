@@ -313,7 +313,7 @@ def main(opt, resume=None, domain=None):
             moment_mix_bg=True,
             moment_mix_min_len=1,
         )
-    elif opt.model_name == "uvcom":
+    elif opt.dset_name == "castella":
         train_dataset = Castella_StartEndDataset(**dataset_config)
     else:
         train_dataset = StartEndDataset(**dataset_config)
