@@ -53,24 +53,43 @@ from torch.utils.data import DataLoader
 from easydict import EasyDict
 
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from config import BaseOptions
 from dataset import StartEndDataset, start_end_collate, prepare_batch_inputs
-from cg_detr_dataset import CGDETR_StartEndDataset, cg_detr_start_end_collate, cg_detr_prepare_batch_inputs
+from cg_detr_dataset import (
+    CGDETR_StartEndDataset,
+    cg_detr_start_end_collate,
+    cg_detr_prepare_batch_inputs,
+)
+from castella_mix_dataset import (
+    Castella_StartEndDataset,
+    start_end_collate,
+    prepare_batch_inputs,
+)
 from evaluate import eval_epoch, start_inference, setup_model
 
-from lighthouse.common.utils.basic_utils import AverageMeter, dict_to_markdown, write_log, save_checkpoint, rename_latest_to_best
+from lighthouse.common.utils.basic_utils import (
+    AverageMeter,
+    dict_to_markdown,
+    write_log,
+    save_checkpoint,
+    rename_latest_to_best,
+)
 from lighthouse.common.utils.model_utils import count_parameters, ModelEMA
 
 from lighthouse.common.loss_func import VTCLoss
 from lighthouse.common.loss_func import CTC_Loss
 
 import logging
+
 logger = logging.getLogger(__name__)
-logging.basicConfig(format="%(asctime)s.%(msecs)03d:%(levelname)s:%(name)s - %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                    level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s.%(msecs)03d:%(levelname)s:%(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
 
 
 def set_seed(seed, use_cuda=True):
@@ -83,37 +102,58 @@ def set_seed(seed, use_cuda=True):
 
 def additional_trdetr_losses(model_inputs, outputs, targets, opt):
     # TR-DETR only loss
-    src_txt_mask,   src_vid_mask = model_inputs['src_txt_mask'], model_inputs['src_vid_mask']
-    pos_mask =  targets['src_pos_mask'] 
+    src_txt_mask, src_vid_mask = (
+        model_inputs["src_txt_mask"],
+        model_inputs["src_vid_mask"],
+    )
+    pos_mask = targets["src_pos_mask"]
 
-    src_txt_ed, src_vid_ed =  outputs['src_txt_ed'], outputs['src_vid_ed']
+    src_txt_ed, src_vid_ed = outputs["src_txt_ed"], outputs["src_vid_ed"]
     loss_align = CTC_Loss()
-    loss_vid_txt_align = loss_align(src_vid_ed, src_txt_ed, pos_mask, src_vid_mask, src_txt_mask)
+    loss_vid_txt_align = loss_align(
+        src_vid_ed, src_txt_ed, pos_mask, src_vid_mask, src_txt_mask
+    )
 
-    src_vid_cls_ed = outputs['src_vid_cls_ed']
-    src_txt_cls_ed = outputs['src_txt_cls_ed']
+    src_vid_cls_ed = outputs["src_vid_cls_ed"]
+    src_txt_cls_ed = outputs["src_txt_cls_ed"]
     loss_align_VTC = VTCLoss()
     loss_vid_txt_align_VTC = loss_align_VTC(src_txt_cls_ed, src_vid_cls_ed)
 
-    loss = opt.VTC_loss_coef * loss_vid_txt_align_VTC + opt.CTC_loss_coef * loss_vid_txt_align
+    loss = (
+        opt.VTC_loss_coef * loss_vid_txt_align_VTC
+        + opt.CTC_loss_coef * loss_vid_txt_align
+    )
     return loss
+
 
 def calculate_taskweave_losses(loss_dict, weight_dict, hd_log_var, mr_log_var):
     # TaskWeave only loss
     grouped_losses = {"loss_mr": [], "loss_hd": []}
     for k in loss_dict.keys():
         if k in weight_dict:
-            if any(keyword in k for keyword in ["giou", "span", "label",'class_error']):
+            if any(
+                keyword in k for keyword in ["giou", "span", "label", "class_error"]
+            ):
                 grouped_losses["loss_mr"].append(loss_dict[k])
             elif "saliency" in k:
                 grouped_losses["loss_hd"].append(loss_dict[k])
     loss_mr = sum(grouped_losses["loss_mr"])
     loss_hd = sum(grouped_losses["loss_hd"])
-    losses = 2 * loss_hd * torch.exp(-hd_log_var) + 1 * loss_mr * torch.exp(-mr_log_var) + hd_log_var + mr_log_var
+    losses = (
+        2 * loss_hd * torch.exp(-hd_log_var)
+        + 1 * loss_mr * torch.exp(-mr_log_var)
+        + hd_log_var
+        + mr_log_var
+    )
     return losses
 
+
 def train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i):
-    batch_input_fn = cg_detr_prepare_batch_inputs  if opt.model_name == 'cg_detr' else prepare_batch_inputs
+    batch_input_fn = (
+        cg_detr_prepare_batch_inputs
+        if opt.model_name == "cg_detr"
+        else prepare_batch_inputs
+    )
     logger.info(f"[Epoch {epoch_i+1}]")
     model.train()
     criterion.train()
@@ -123,38 +163,54 @@ def train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i):
 
     num_training_examples = len(train_loader)
     timer_dataloading = time.time()
-    for batch_idx, batch in tqdm(enumerate(train_loader),
-                                 desc="Training Iteration",
-                                 total=num_training_examples):
+    for batch_idx, batch in tqdm(
+        enumerate(train_loader), desc="Training Iteration", total=num_training_examples
+    ):
         model_inputs, targets = batch_input_fn(batch[1], opt.device)
-        
-        if opt.model_name == 'taskweave':
-            model_inputs['epoch_i'] = epoch_i # taskweave requires epoch number
+
+        if opt.model_name == "taskweave":
+            model_inputs["epoch_i"] = epoch_i  # taskweave requires epoch number
             outputs, [hd_log_var, mr_log_var] = model(**model_inputs)
             loss_dict = criterion(outputs, targets)
-            losses = calculate_taskweave_losses(loss_dict, criterion.weight_dict, hd_log_var, mr_log_var)
+            losses = calculate_taskweave_losses(
+                loss_dict, criterion.weight_dict, hd_log_var, mr_log_var
+            )
             optimizer.zero_grad()
             losses.backward()
         else:
-            outputs = model(**model_inputs, targets=targets) if opt.model_name == 'cg_detr' else model(**model_inputs)
+            outputs = (
+                model(**model_inputs, targets=targets)
+                if opt.model_name == "cg_detr"
+                else model(**model_inputs)
+            )
             loss_dict = criterion(outputs, targets)
-            losses = sum(loss_dict[k] * criterion.weight_dict[k] for k in loss_dict.keys() if k in criterion.weight_dict)
-            
-            if opt.model_name == 'tr_detr' \
-                and (opt.dset_name != 'tvsum' and opt.dset_name != 'youtube_highlight' 
-                    and opt.dset_name != 'qvhighlight_pretrain'):
+            losses = sum(
+                loss_dict[k] * criterion.weight_dict[k]
+                for k in loss_dict.keys()
+                if k in criterion.weight_dict
+            )
+
+            if opt.model_name == "tr_detr" and (
+                opt.dset_name != "tvsum"
+                and opt.dset_name != "youtube_highlight"
+                and opt.dset_name != "qvhighlight_pretrain"
+            ):
                 losses += additional_trdetr_losses(model_inputs, outputs, targets, opt)
-            
+
             optimizer.zero_grad()
             losses.backward()
-        
+
         if opt.grad_clip > 0:
             nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
         optimizer.step()
 
         loss_dict["loss_overall"] = float(losses)
         for k, v in loss_dict.items():
-            loss_meters[k].update(float(v) * criterion.weight_dict[k] if k in criterion.weight_dict else float(v))
+            loss_meters[k].update(
+                float(v) * criterion.weight_dict[k]
+                if k in criterion.weight_dict
+                else float(v)
+            )
 
     write_log(opt, epoch_i, loss_meters)
 
@@ -162,7 +218,9 @@ def train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i):
 def train(model, criterion, optimizer, lr_scheduler, train_dataset, val_dataset, opt):
     opt.train_log_txt_formatter = "{time_str} [Epoch] {epoch:03d} [Loss] {loss_str}\n"
     opt.eval_log_txt_formatter = "{time_str} [Epoch] {epoch:03d} [Loss] {loss_str} [Metrics] {eval_metrics_str}\n"
-    collate_fn = cg_detr_start_end_collate if opt.model_name == 'cg_detr' else start_end_collate
+    collate_fn = (
+        cg_detr_start_end_collate if opt.model_name == "cg_detr" else start_end_collate
+    )
     save_submission_filename = "latest_{}_val_preds.jsonl".format(opt.dset_name)
 
     train_loader = DataLoader(
@@ -188,16 +246,28 @@ def train(model, criterion, optimizer, lr_scheduler, train_dataset, val_dataset,
         if (epoch_i + 1) % opt.eval_epoch_interval == 0:
             with torch.no_grad():
                 if opt.model_ema:
-                    metrics, eval_loss_meters, latest_file_paths = \
-                        eval_epoch(epoch_i, model_ema.module, val_dataset, opt, save_submission_filename, criterion)
+                    metrics, eval_loss_meters, latest_file_paths = eval_epoch(
+                        epoch_i,
+                        model_ema.module,
+                        val_dataset,
+                        opt,
+                        save_submission_filename,
+                        criterion,
+                    )
                 else:
-                    metrics, eval_loss_meters, latest_file_paths = \
-                        eval_epoch(epoch_i, model, val_dataset, opt, save_submission_filename, criterion)
+                    metrics, eval_loss_meters, latest_file_paths = eval_epoch(
+                        epoch_i,
+                        model,
+                        val_dataset,
+                        opt,
+                        save_submission_filename,
+                        criterion,
+                    )
 
-            write_log(opt, epoch_i, eval_loss_meters, metrics=metrics, mode='val')            
+            write_log(opt, epoch_i, eval_loss_meters, metrics=metrics, mode="val")
             logger.info("metrics {}".format(pprint.pformat(metrics["brief"], indent=4)))
-            
-            if opt.dset_name == 'tvsum' or opt.dset_name == 'youtube_highlight':
+
+            if opt.dset_name == "tvsum" or opt.dset_name == "youtube_highlight":
                 stop_score = metrics["brief"]["mAP"]
             else:
                 stop_score = metrics["brief"]["MR-full-mAP"]
@@ -234,45 +304,77 @@ def main(opt, resume=None, domain=None):
         load_labels=True,
     )
 
-    train_dataset = CGDETR_StartEndDataset(**dataset_config) if opt.model_name == 'cg_detr' else StartEndDataset(**dataset_config)    
+    if opt.model_name == "cg_detr":
+        train_dataset = CGDETR_StartEndDataset(
+            **dataset_config,
+            use_moment_mix=True,
+            moment_mix_epsilon=5.0,
+            moment_mix_prob=0.5,
+            moment_mix_bg=True,
+            moment_mix_min_len=1,
+        )
+    elif opt.model_name == "uvcom":
+        train_dataset = Castella_StartEndDataset(**dataset_config)
+    else:
+        train_dataset = StartEndDataset(**dataset_config)
     copied_eval_config = copy.deepcopy(dataset_config)
     copied_eval_config.data_path = opt.eval_path
-    copied_eval_config.q_feat_dir = opt.t_feat_dir_pretrain_eval if opt.t_feat_dir_pretrain_eval is not None else opt.t_feat_dir
-    eval_dataset = CGDETR_StartEndDataset(**copied_eval_config) if opt.model_name == 'cg_detr' else StartEndDataset(**copied_eval_config)
-    
+    copied_eval_config.q_feat_dir = (
+        opt.t_feat_dir_pretrain_eval
+        if opt.t_feat_dir_pretrain_eval is not None
+        else opt.t_feat_dir
+    )
+    eval_dataset = (
+        CGDETR_StartEndDataset(**copied_eval_config)
+        if opt.model_name == "cg_detr"
+        else StartEndDataset(**copied_eval_config)
+    )
+
     # prepare model
     model, criterion, optimizer, lr_scheduler = setup_model(opt)
     logger.info(f"Model {model}")
-    
+
     # load checkpoint for QVHighlight pretrain -> finetune
     if resume is not None:
         checkpoint = torch.load(resume, weights_only=False)
         model.load_state_dict(checkpoint["model"])
         logger.info("Loaded model checkpoint: {}".format(resume))
-    
+
     count_parameters(model)
     logger.info("Start Training...")
-    
+
     # start training
     train(model, criterion, optimizer, lr_scheduler, train_dataset, eval_dataset, opt)
 
 
 def check_valid_combination(dataset, feature, domain):
     dataset_feature_map = {
-        'qvhighlight': ['resnet_glove', 'clip', 'clip_slowfast', 'clip_slowfast_pann'],
-        'qvhighlight_pretrain': ['resnet_glove', 'clip', 'clip_slowfast', 'clip_slowfast_pann'],
-        'activitynet': ['resnet_glove', 'clip', 'clip_slowfast'],
-        'charades': ['resnet_glove', 'clip', 'clip_slowfast'],
-        'tacos': ['resnet_glove', 'clip', 'clip_slowfast'],
-        'tvsum': ['resnet_glove', 'clip', 'clip_slowfast', 'i3d_clip'],
-        'youtube_highlight': ['clip', 'clip_slowfast'],
-        'clotho-moment': ['clap'],
-        'castella': ['clap'],
+        "qvhighlight": ["resnet_glove", "clip", "clip_slowfast", "clip_slowfast_pann"],
+        "qvhighlight_pretrain": [
+            "resnet_glove",
+            "clip",
+            "clip_slowfast",
+            "clip_slowfast_pann",
+        ],
+        "activitynet": ["resnet_glove", "clip", "clip_slowfast"],
+        "charades": ["resnet_glove", "clip", "clip_slowfast"],
+        "tacos": ["resnet_glove", "clip", "clip_slowfast"],
+        "tvsum": ["resnet_glove", "clip", "clip_slowfast", "i3d_clip"],
+        "youtube_highlight": ["clip", "clip_slowfast"],
+        "clotho-moment": ["clap"],
+        "castella": ["clap"],
     }
 
     domain_map = {
-        'tvsum': ['BK', 'BT', 'DS', 'FM', 'GA', 'MS', 'PK', 'PR', 'VT', 'VU'],
-        'youtube_highlight': ['dog', 'gymnastics', 'parkour', 'skating', 'skiing', 'surfing'],
+        "tvsum": ["BK", "BT", "DS", "FM", "GA", "MS", "PK", "PR", "VT", "VU"],
+        "youtube_highlight": [
+            "dog",
+            "gymnastics",
+            "parkour",
+            "skating",
+            "skiing",
+            "surfing",
+        ],
     }
 
     if dataset in domain_map:
@@ -281,32 +383,104 @@ def check_valid_combination(dataset, feature, domain):
         return feature in dataset_feature_map[dataset]
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', '-m', type=str, required=True, 
-                        choices=['moment_detr', 'qd_detr', 'eatr', 'cg_detr', 'uvcom', 'tr_detr', 'taskweave_hd2mr', 'taskweave_mr2hd'],
-                        help='model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, tr_detr, taskweave_hd2mr, taskweave_mr2hd]')
-    parser.add_argument('--dataset', '-d', type=str, required=True,
-                        choices=['activitynet', 'charades', 'qvhighlight', 'qvhighlight_pretrain', 'tacos', 'tvsum', 'youtube_highlight', 'clotho-moment', 'castella'],
-                        help='dataset name. select from [activitynet, charades, qvhighlight, qvhighlight_pretrain, tacos, tvsum, youtube_highlight, clotho-moment, castella]')
-    parser.add_argument('--feature', '-f', type=str, required=True,
-                        choices=['resnet_glove', 'clip', 'clip_slowfast', 'clip_slowfast_pann', 'i3d_clip', 'clap'],
-                        help='feature name. select from [resnet_glove, clip, clip_slowfast, clip_slowfast_pann, i3d_clip, clap].'
-                             'NOTE: i3d_clip and clip_slowfast_pann are only for TVSum and QVHighlight, respectively.')
-    parser.add_argument('--resume', '-r', type=str, help='specify model path for fine-tuning. If None, train the model from scratch.')
-    parser.add_argument('--domain', '-dm', type=str,
-                        choices=['BK', 'BT', 'DS', 'FM', 'GA', 'MS', 'PK', 'PR', 'VT', 'VU',
-                                 'dog', 'gymnastics', 'parkour', 'skating', 'skiing', 'surfing'],
-                        help='domain for highlight detection dataset (e.g., BK for TVSum, dog for YouTube Highlight).')
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        required=True,
+        choices=[
+            "moment_detr",
+            "qd_detr",
+            "eatr",
+            "cg_detr",
+            "uvcom",
+            "tr_detr",
+            "taskweave_hd2mr",
+            "taskweave_mr2hd",
+        ],
+        help="model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, tr_detr, taskweave_hd2mr, taskweave_mr2hd]",
+    )
+    parser.add_argument(
+        "--dataset",
+        "-d",
+        type=str,
+        required=True,
+        choices=[
+            "activitynet",
+            "charades",
+            "qvhighlight",
+            "qvhighlight_pretrain",
+            "tacos",
+            "tvsum",
+            "youtube_highlight",
+            "clotho-moment",
+            "castella",
+        ],
+        help="dataset name. select from [activitynet, charades, qvhighlight, qvhighlight_pretrain, tacos, tvsum, youtube_highlight, clotho-moment, castella]",
+    )
+    parser.add_argument(
+        "--feature",
+        "-f",
+        type=str,
+        required=True,
+        choices=[
+            "resnet_glove",
+            "clip",
+            "clip_slowfast",
+            "clip_slowfast_pann",
+            "i3d_clip",
+            "clap",
+        ],
+        help="feature name. select from [resnet_glove, clip, clip_slowfast, clip_slowfast_pann, i3d_clip, clap]."
+        "NOTE: i3d_clip and clip_slowfast_pann are only for TVSum and QVHighlight, respectively.",
+    )
+    parser.add_argument(
+        "--resume",
+        "-r",
+        type=str,
+        help="specify model path for fine-tuning. If None, train the model from scratch.",
+    )
+    parser.add_argument(
+        "--domain",
+        "-dm",
+        type=str,
+        choices=[
+            "BK",
+            "BT",
+            "DS",
+            "FM",
+            "GA",
+            "MS",
+            "PK",
+            "PR",
+            "VT",
+            "VU",
+            "dog",
+            "gymnastics",
+            "parkour",
+            "skating",
+            "skiing",
+            "surfing",
+        ],
+        help="domain for highlight detection dataset (e.g., BK for TVSum, dog for YouTube Highlight).",
+    )
     args = parser.parse_args()
 
     is_valid = check_valid_combination(args.dataset, args.feature, args.domain)
 
     if is_valid:
-        option_manager = BaseOptions(args.model, args.dataset, args.feature, args.resume, args.domain)
+        option_manager = BaseOptions(
+            args.model, args.dataset, args.feature, args.resume, args.domain
+        )
         option_manager.parse()
         option_manager.clean_and_makedirs()
         opt = option_manager.option
         main(opt, resume=args.resume, domain=args.domain)
     else:
-        raise ValueError('The combination of dataset, feature, and domain is invalid: dataset={}, feature={}, domain={}'.format(args.dataset, args.feature, args.domain))
+        raise ValueError(
+            "The combination of dataset, feature, and domain is invalid: dataset={}, feature={}, domain={}".format(
+                args.dataset, args.feature, args.domain
+            )
+        )
