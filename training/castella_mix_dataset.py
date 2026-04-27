@@ -324,6 +324,8 @@ class Castella_StartEndDataset(Dataset):
         self.max_a_l = max_a_l
 
         self.ctx_mode = ctx_mode
+        self.use_tef = "tef" in ctx_mode
+        self.use_video=False
         self.clip_len = clip_len
         self.max_windows = max_windows  # maximum number of windows to use as labels
         self.span_loss_type = span_loss_type
@@ -423,6 +425,16 @@ class Castella_StartEndDataset(Dataset):
             meta["relevant_windows"] = new_windows
 
         model_inputs["audio_feat"] = audio_feat
+
+        if self.use_tef:
+            tef_st = torch.arange(0, ctx_l, 1.0) / ctx_l
+            tef_ed = tef_st + 1.0 / ctx_l
+            tef = torch.stack([tef_st, tef_ed], dim=1)  # (Lv, 2)
+            if self.use_video:
+                model_inputs["video_feat"] = torch.cat(
+                    [model_inputs["video_feat"], tef], dim=1)  # (Lv, Dv+2)
+            else:
+                model_inputs["video_feat"] = tef
 
         if self.load_labels:
             model_inputs["span_labels"] = self.get_span_labels(
