@@ -306,13 +306,13 @@ def main(opt, resume=None, domain=None):
 
     if opt.model_name == "cg_detr":
         train_dataset = CGDETR_StartEndDataset(**dataset_config)
-    elif opt.dset_name == "castella":
-        train_dataset = Castella_StartEndDataset(**dataset_config,
-            use_moment_mix=True,
-            moment_mix_epsilon=5.0,
-            moment_mix_prob=0.5,
-            moment_mix_bg=True,
-            moment_mix_min_len=1,)
+    # elif opt.dset_name == "castella":
+    #     train_dataset = Castella_StartEndDataset(**dataset_config,
+    #         use_moment_mix=True,
+    #         moment_mix_epsilon=5.0,
+    #         moment_mix_prob=0.5,
+    #         moment_mix_bg=True,
+    #         moment_mix_min_len=1,)
     else:
         train_dataset = StartEndDataset(**dataset_config)
     copied_eval_config = copy.deepcopy(dataset_config)
