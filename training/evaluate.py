@@ -45,7 +45,8 @@ from collections import OrderedDict, defaultdict
 from easydict import EasyDict
 
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from lighthouse.common.utils.basic_utils import AverageMeter
 from lighthouse.common.utils.span_utils import span_cxw_to_xx
@@ -58,7 +59,11 @@ import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 
 from training.dataset import StartEndDataset, start_end_collate, prepare_batch_inputs
-from training.cg_detr_dataset import CGDETR_StartEndDataset, cg_detr_start_end_collate, cg_detr_prepare_batch_inputs
+from training.cg_detr_dataset import (
+    CGDETR_StartEndDataset,
+    cg_detr_start_end_collate,
+    cg_detr_prepare_batch_inputs,
+)
 
 from training.postprocessing import PostProcessorDETR
 from standalone_eval.eval import eval_submission
@@ -75,9 +80,11 @@ from lighthouse.common.taskweave import build_model as build_model_task_weave
 import logging
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(format="%(asctime)s.%(msecs)03d:%(levelname)s:%(name)s - %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                    level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s.%(msecs)03d:%(levelname)s:%(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
 
 
 def eval_epoch_post_processing(submission, opt, gt_data, save_submission_filename):
@@ -92,7 +99,9 @@ def eval_epoch_post_processing(submission, opt, gt_data, save_submission_filenam
         latest_file_paths = [submission_path, save_metrics_path]
     else:
         metrics = None
-        latest_file_paths = [submission_path, ]
+        latest_file_paths = [
+            submission_path,
+        ]
 
     return metrics, latest_file_paths
 
@@ -100,36 +109,40 @@ def eval_epoch_post_processing(submission, opt, gt_data, save_submission_filenam
 # for HL
 @torch.no_grad()
 def compute_hl_results(epoch_i, model, eval_loader, opt, criterion=None):
-    batch_input_fn = cg_detr_prepare_batch_inputs  if opt.model_name == 'cg_detr' else prepare_batch_inputs
+    batch_input_fn = (
+        cg_detr_prepare_batch_inputs
+        if opt.model_name == "cg_detr"
+        else prepare_batch_inputs
+    )
     loss_meters = defaultdict(AverageMeter)
 
     video_ap_collected = []
-    topk = 5 # top-5 map
+    topk = 5  # top-5 map
 
     for batch in tqdm(eval_loader, desc="compute st ed scores"):
         query_meta = batch[0]
         model_inputs, targets = batch_input_fn(batch[1], opt.device)
 
-        if opt.model_name == 'taskweave':
-            model_inputs['epoch_i'] = epoch_i
+        if opt.model_name == "taskweave":
+            model_inputs["epoch_i"] = epoch_i
             outputs, _ = model(**model_inputs)
         else:
             outputs = model(**model_inputs)
 
-        preds = outputs['saliency_scores']
+        preds = outputs["saliency_scores"]
         for meta, pred in zip(query_meta, preds):
-            label = meta['label'] # raw label
+            label = meta["label"]  # raw label
             video_ap = []
             # Follow the UMT code "https://github.com/TencentARC/UMT/blob/main/datasets/tvsum.py"
-            if opt.dset_name == 'tvsum':
+            if opt.dset_name == "tvsum":
                 for i in range(20):
                     pred = pred.cpu()
-                    cur_pred = pred[:len(label)]
+                    cur_pred = pred[: len(label)]
                     inds = torch.argsort(cur_pred, descending=True, dim=-1)
 
                     # video_id = self.get_video_id(idx)
                     cur_label = torch.Tensor(label)[:, i]
-                    cur_label = torch.where(cur_label > cur_label.median(), 1.0, .0)
+                    cur_label = torch.where(cur_label > cur_label.median(), 1.0, 0.0)
 
                     cur_label = cur_label[inds].tolist()[:topk]
 
@@ -152,9 +165,9 @@ def compute_hl_results(epoch_i, model, eval_loader, opt, criterion=None):
                         rec, prc = _rec, _prc
 
                     video_ap.append(ap)
-            
-            elif opt.dset_name == 'youtube_highlight':
-                cur_pred = pred[:len(label)].cpu()
+
+            elif opt.dset_name == "youtube_highlight":
+                cur_pred = pred[: len(label)].cpu()
                 inds = torch.argsort(cur_pred, descending=True, dim=-1)
                 cur_label = torch.Tensor(label).squeeze()[inds].tolist()
                 num_gt = sum(cur_label)
@@ -173,23 +186,167 @@ def compute_hl_results(epoch_i, model, eval_loader, opt, criterion=None):
 
                     ap += (_rec - rec) * (prc + _prc) / 2
                     rec, prc = _rec, _prc
-                
+
                 video_ap.append(float(ap))
 
             else:
                 raise NotImplementedError
 
-            video_ap_collected.append(video_ap)  
+            video_ap_collected.append(video_ap)
 
     mean_ap = np.mean(video_ap_collected)
     submmission = dict(mAP=round(mean_ap, 5))
-    
+
     return submmission, loss_meters
 
 
 @torch.no_grad()
+def compute_mr_results_with_retrieval(
+    epoch_i, model, eval_loader, opt, criterion=None, alpha=0.5, top_k=3
+):
+    model.eval()
+    if criterion is not None:
+        criterion.eval()
+
+    mr_res = []
+    for batch in tqdm(eval_loader, desc="Retrieval + Localization"):
+        query_meta = batch[0]  # список метаданных (batch_size)
+        batch_inputs = batch[1]
+
+        batch_size = len(query_meta)
+
+        for i in range(batch_size):
+            meta = query_meta[i]
+
+            text_emb = batch_inputs["query_global"][i]
+            query_feat_padded = batch_inputs["query_feat"][0][i]  # (max_len, D)
+            query_mask = batch_inputs["query_feat"][1][i]  # (max_len,)
+
+            target_global = batch_inputs["target_audio_global"][i]  # tensor (D,)
+            distractor_globals = batch_inputs["distractor_audios_global"][
+                i
+            ]  # list of tensors
+            candidate_vids = batch_inputs["candidate_vids"][i]  # list of str
+            all_globals = torch.stack(
+                [target_global] + distractor_globals
+            )  # (N_cand, D)
+            all_globals = F.normalize(all_globals, dim=1)
+
+            cos_scores = torch.matmul(all_globals, text_emb)  # (N_cand,)
+            print(f"Query: {meta['qid']} - {meta['query'][:50]}...")
+            print(f"Target vid: {meta['vid']}")
+            print("\nAll candidates (vid, cos_score):")
+            for idx, vid in enumerate(candidate_vids):
+                print(f"  {idx}: {vid} -> {cos_scores[idx].item():.4f}")
+
+            topk_vals, topk_idx = torch.topk(
+                cos_scores, min(top_k, len(candidate_vids))
+            )
+            topk_idx = topk_idx.cpu().tolist()
+            print(f"\nTop-{top_k} candidates by cosine:")
+            for rank, (idx, score) in enumerate(zip(topk_idx, topk_vals)):
+                print(f"  {rank+1}: {candidate_vids[idx]} (cos={score.item():.4f})")
+            best_combined = -float("inf")
+            best_pred = None
+
+            use_tef = "tef" in opt.ctx_mode
+
+            for k_idx in topk_idx:
+                cand_vid = candidate_vids[k_idx]
+                print(
+                    f"\n--- Evaluating candidate: {cand_vid} (cos={cos_scores[k_idx].item():.4f})"
+                )
+                temp_feat = eval_loader.dataset._get_audio_feat_by_vid(
+                    cand_vid
+                )  # (L, D)
+                ctx_l = len(temp_feat)
+                if use_tef:
+                    tef_st = torch.arange(0, ctx_l, 1.0) / ctx_l
+                    tef_ed = tef_st + 1.0 / ctx_l
+                    tef = torch.stack([tef_st, tef_ed], dim=1).to(opt.device)
+                    src_vid = tef.unsqueeze(0)  # (1, L, 2)
+                    src_vid_mask = torch.ones(
+                        1, ctx_l, dtype=torch.long, device=opt.device
+                    )
+                else:
+                    src_vid = None
+                    src_vid_mask = None
+
+                src_aud = temp_feat.unsqueeze(0).to(opt.device)  # (1, L, D)
+                src_aud_mask = torch.ones(1, ctx_l, dtype=torch.long, device=opt.device)
+                src_txt = query_feat_padded.unsqueeze(0).to(
+                    opt.device
+                )  # (1, max_len, D)
+                src_txt_mask = query_mask.unsqueeze(0).to(opt.device)
+
+                model_inputs = {
+                    "src_txt": src_txt,
+                    "src_txt_mask": src_txt_mask,
+                    "src_aud": src_aud,
+                    "src_aud_mask": src_aud_mask,
+                    "src_vid": src_vid,
+                    "src_vid_mask": src_vid_mask,
+                }
+                outputs = model(**model_inputs)
+
+                prob = F.softmax(outputs["pred_logits"], -1)  # (1, #queries, 2)
+                loc_score = prob[..., 0].max().item()  # foreground score
+
+                cos_val = cos_scores[k_idx].item()
+                combined = alpha * cos_val + (1 - alpha) * loc_score
+                print(
+                    f"    loc_score={loc_score:.4f}, combined={combined:.4f} (alpha={alpha})"
+                )
+
+                if combined > best_combined:
+                    best_combined = combined
+                    pred_spans = outputs["pred_spans"].cpu()  # (1, #queries, 2)
+                    scores = prob[..., 0].cpu()  # (1, #queries)
+                    spans = span_cxw_to_xx(pred_spans[0]) * meta["duration"]
+                    cur_ranked_preds = torch.cat(
+                        [spans, scores[0][:, None]], dim=1
+                    ).tolist()
+                    cur_ranked_preds = sorted(
+                        cur_ranked_preds, key=lambda x: x[2], reverse=True
+                    )
+                    cur_ranked_preds = [
+                        [float(f"{e:.4f}") for e in row] for row in cur_ranked_preds
+                    ]
+                    best_pred = dict(
+                        qid=meta["qid"],
+                        query=meta["query"],
+                        vid=cand_vid,
+                        pred_relevant_windows=cur_ranked_preds,
+                    )
+            print(f"\n>>> BEST: {best_pred['vid']} (combined={best_combined:.4f})")
+            if best_pred is not None:
+                mr_res.append(best_pred)
+            else:
+                mr_res.append(
+                    dict(
+                        qid=meta["qid"],
+                        query=meta["query"],
+                        vid=meta["vid"],
+                        pred_relevant_windows=[[0.0, meta["duration"], 0.0]],
+                    )
+                )
+
+    post_processor = PostProcessorDETR(
+        clip_length=opt.clip_length,
+        min_ts_val=0,
+        max_ts_val=300,
+        min_w_l=1,
+        max_w_l=300,
+        move_window_method="left",
+        process_func_names=("clip_ts", "round_multiple"),
+    )
+    mr_res = post_processor(mr_res)
+    return mr_res, {}
+
+
+@torch.no_grad()
 def compute_mr_results(epoch_i, model, eval_loader, opt, criterion=None):
-    batch_input_fn = cg_detr_prepare_batch_inputs if opt.model_name == 'cg_detr' else prepare_batch_inputs
+    batch_input_fn = prepare_batch_inputs
     loss_meters = defaultdict(AverageMeter)
 
     mr_res = []
@@ -197,11 +354,7 @@ def compute_mr_results(epoch_i, model, eval_loader, opt, criterion=None):
         query_meta = batch[0]
         model_inputs, targets = batch_input_fn(batch[1], opt.device)
 
-        if opt.model_name == 'taskweave':
-            model_inputs['epoch_i'] = epoch_i
-            outputs, _ = model(**model_inputs)
-        else:
-            outputs = model(**model_inputs)
+        outputs = model(**model_inputs)
 
         # saliency scores
         _saliency_scores = outputs["saliency_scores"].half()  # (bsz, L)
@@ -213,68 +366,55 @@ def compute_mr_results(epoch_i, model, eval_loader, opt, criterion=None):
 
         # compose predictions
         pred_spans = outputs["pred_spans"].cpu()  # (bsz, #queries, 2)
-        prob = F.softmax(outputs["pred_logits"], -1)  # (batch_size, #queries, #classes=2)
-        scores = prob[..., 0].cpu()  # * (batch_size, #queries)  foreground label is 0, we directly take it
+        prob = F.softmax(
+            outputs["pred_logits"], -1
+        )  # (batch_size, #queries, #classes=2)
+        scores = prob[
+            ..., 0
+        ].cpu()  # * (batch_size, #queries)  foreground label is 0, we directly take it
 
-        for idx, (meta, spans, score) in enumerate(zip(query_meta, pred_spans, scores)):            
+        for idx, (meta, spans, score) in enumerate(zip(query_meta, pred_spans, scores)):
             spans = span_cxw_to_xx(spans) * meta["duration"]
             cur_ranked_preds = torch.cat([spans, score[:, None]], dim=1).tolist()
-            cur_ranked_preds = sorted(cur_ranked_preds, key=lambda x: x[2], reverse=True)
-            cur_ranked_preds = [[float(f"{e:.4f}") for e in row] for row in cur_ranked_preds]
+            cur_ranked_preds = sorted(
+                cur_ranked_preds, key=lambda x: x[2], reverse=True
+            )
+            cur_ranked_preds = [
+                [float(f"{e:.4f}") for e in row] for row in cur_ranked_preds
+            ]
 
-            if opt.dset_name in ['qvhighlight', 'qvhighlight_pretrain']:
-                cur_query_pred = dict(
-                    qid=meta["qid"],
-                    query=meta["query"],
-                    vid=meta["vid"],
-                    pred_relevant_windows=cur_ranked_preds,
-                    pred_saliency_scores=saliency_scores[idx]
-                )
-            else:
-                # anet, charades
-                cur_query_pred = dict(
-                    qid=meta["qid"],
-                    query=meta["query"],
-                    vid=meta["vid"],
-                    pred_relevant_windows=cur_ranked_preds,
-                )
+            cur_query_pred = dict(
+                qid=meta["qid"],
+                query=meta["query"],
+                vid=meta["vid"],
+                pred_relevant_windows=cur_ranked_preds,
+            )
 
             mr_res.append(cur_query_pred)
 
         if criterion:
             loss_dict = criterion(outputs, targets)
             weight_dict = criterion.weight_dict
-            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+            losses = sum(
+                loss_dict[k] * weight_dict[k]
+                for k in loss_dict.keys()
+                if k in weight_dict
+            )
             loss_dict["loss_overall"] = float(losses)
             for k, v in loss_dict.items():
-                loss_meters[k].update(float(v) * weight_dict[k] if k in weight_dict else float(v))
+                loss_meters[k].update(
+                    float(v) * weight_dict[k] if k in weight_dict else float(v)
+                )
 
-    if opt.dset_name in ['qvhighlight', 'qvhighlight_pretrain']:
-        post_processor = PostProcessorDETR(
-            clip_length=opt.clip_length, min_ts_val=0, max_ts_val=150,
-            min_w_l=2, max_w_l=150, move_window_method="left",
-            process_func_names=("clip_ts", "round_multiple")
-        )
-    elif opt.dset_name in ['charades', 'clotho-moment', 'unav100-subset', 'tut2017']:
-        post_processor = PostProcessorDETR(
-            clip_length=opt.clip_length, min_ts_val=0, max_ts_val=150,
-            min_w_l=2, max_w_l=60, move_window_method="left",
-            process_func_names=("clip_ts", "round_multiple")
-        )
-    elif opt.dset_name in ['castella']:
-        post_processor = PostProcessorDETR(
-            clip_length=opt.clip_length, min_ts_val=0, max_ts_val=300,
-            min_w_l=1, max_w_l=300, move_window_method="left",
-            process_func_names=("clip_ts", "round_multiple")
-        )
-    elif opt.dset_name in ['tacos', 'activitynet', 'youtube_highlight']:
-        post_processor = PostProcessorDETR(
-            clip_length=opt.clip_length, min_ts_val=0, max_ts_val=50000,
-            min_w_l=0, max_w_l=50000, move_window_method="left",
-            process_func_names=(["round_multiple"])
-        )
-    else:
-        raise NotImplementedError
+    post_processor = PostProcessorDETR(
+        clip_length=opt.clip_length,
+        min_ts_val=0,
+        max_ts_val=300,
+        min_w_l=1,
+        max_w_l=300,
+        move_window_method="left",
+        process_func_names=("clip_ts", "round_multiple"),
+    )
 
     mr_res = post_processor(mr_res)
     return mr_res, loss_meters
@@ -282,57 +422,81 @@ def compute_mr_results(epoch_i, model, eval_loader, opt, criterion=None):
 
 def get_eval_res(epoch_i, model, eval_loader, opt, criterion):
     """compute and save query and video proposal embeddings"""
-    eval_res, eval_loss_meters = compute_mr_results(epoch_i, model, eval_loader, opt, criterion)
+    eval_res, eval_loss_meters = compute_mr_results(
+        epoch_i, model, eval_loader, opt, criterion
+    )
     return eval_res, eval_loss_meters
 
 
-def eval_epoch(epoch_i, model, eval_dataset, opt, save_submission_filename, criterion=None):
-    collate_fn = cg_detr_start_end_collate if opt.model_name == 'cg_detr' else start_end_collate
+def eval_epoch(
+    epoch_i, model, eval_dataset, opt, save_submission_filename, criterion=None
+):
+    collate_fn = start_end_collate
     logger.info("Generate submissions")
     model.eval()
     if criterion is not None:
         criterion.eval()
 
-    eval_loader = DataLoader(
-        eval_dataset,
-        collate_fn=collate_fn,
-        batch_size=opt.eval_bsz,
-        num_workers=opt.num_workers,
-        shuffle=False,
-    )
-
-    if opt.dset_name == 'tvsum' or opt.dset_name == 'youtube_highlight':
-        metrics, eval_loss_meters = compute_hl_results(epoch_i, model, eval_loader, opt, criterion)
-        # to match original save format
-        submission = [{ "brief" : metrics }]
-        save_metrics_path = os.path.join(opt.results_dir, save_submission_filename.replace('.jsonl', '_metrics.jsonl'))
-        save_jsonl(submission, save_metrics_path)
-        return submission[0], eval_loss_meters, [save_metrics_path]
+    if (
+        hasattr(eval_dataset, "eval_mode")
+        and eval_dataset.eval_mode
+        and eval_dataset.num_distractors > 0
+    ):
+        eval_loader = DataLoader(
+            eval_dataset,
+            collate_fn=collate_fn,
+            batch_size=1,
+            num_workers=opt.num_workers,
+            shuffle=False,
+        )
+        submission, eval_loss_meters = compute_mr_results_with_retrieval(
+            epoch_i,
+            model,
+            eval_loader,
+            opt,
+            criterion,
+            alpha=0.5,
+            top_k=3,
+        )
     else:
-        submission, eval_loss_meters = get_eval_res(epoch_i, model, eval_loader, opt, criterion)        
-        metrics, latest_file_paths = eval_epoch_post_processing(
-            submission, opt, eval_dataset.data, save_submission_filename)
-        return metrics, eval_loss_meters, latest_file_paths
+        # Стандартный путь
+        eval_loader = DataLoader(
+            eval_dataset,
+            collate_fn=collate_fn,
+            batch_size=opt.eval_bsz,
+            num_workers=opt.num_workers,
+            shuffle=False,
+        )
+        submission, eval_loss_meters = get_eval_res(
+            epoch_i, model, eval_loader, opt, criterion
+        )
+
+    metrics, latest_file_paths = eval_epoch_post_processing(
+        submission, opt, eval_dataset.data, save_submission_filename
+    )
+    return metrics, eval_loss_meters, latest_file_paths
+
 
 def build_model(opt):
-    if opt.model_name == 'qd_detr':
+    if opt.model_name == "qd_detr":
         model, criterion = build_model_qd_detr(opt)
-    elif opt.model_name == 'moment_detr':
+    elif opt.model_name == "moment_detr":
         model, criterion = build_model_moment_detr(opt)
-    elif opt.model_name == 'cg_detr':
+    elif opt.model_name == "cg_detr":
         model, criterion = build_model_cg_detr(opt)
-    elif opt.model_name == 'eatr':
+    elif opt.model_name == "eatr":
         model, criterion = build_model_eatr(opt)
-    elif opt.model_name == 'tr_detr':
+    elif opt.model_name == "tr_detr":
         model, criterion = build_model_tr_detr(opt)
-    elif opt.model_name == 'uvcom':
+    elif opt.model_name == "uvcom":
         model, criterion = build_model_uvcom(opt)
-    elif opt.model_name == 'taskweave':
+    elif opt.model_name == "taskweave":
         model, criterion = build_model_task_weave(opt)
     else:
         raise NotImplementedError
-    
+
     return model, criterion
+
 
 def setup_model(opt):
     """setup model/optimizer/scheduler and load checkpoints when needed"""
@@ -344,7 +508,9 @@ def setup_model(opt):
         model.to(opt.device)
         criterion.to(opt.device)
 
-    param_dicts = [{"params": [p for n, p in model.named_parameters() if p.requires_grad]}]
+    param_dicts = [
+        {"params": [p for n, p in model.named_parameters() if p.requires_grad]}
+    ]
     optimizer = torch.optim.AdamW(param_dicts, lr=opt.lr, weight_decay=opt.wd)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, opt.lr_drop)
 
@@ -356,9 +522,9 @@ def start_inference(opt, domain=None):
 
     cudnn.benchmark = True
     cudnn.deterministic = False
-    load_labels = opt.eval_split_name == 'val'
-    epoch_i = None # for TaskWeave.
-    
+    load_labels = opt.eval_split_name == "val"
+    epoch_i = None  # for TaskWeave.
+
     # dataset & data loader
     dataset_config = EasyDict(
         dset_name=opt.dset_name,
@@ -379,8 +545,12 @@ def start_inference(opt, domain=None):
         span_loss_type=opt.span_loss_type,
         load_labels=load_labels,
     )
-    
-    eval_dataset = CGDETR_StartEndDataset(**dataset_config) if opt.model_name == 'cg_detr' else StartEndDataset(**dataset_config)
+
+    eval_dataset = (
+        CGDETR_StartEndDataset(**dataset_config)
+        if opt.model_name == "cg_detr"
+        else StartEndDataset(**dataset_config, num_distractors=10, eval_mode=True)
+    )
     model, criterion, _, _ = setup_model(opt)
     checkpoint = torch.load(opt.model_path, weights_only=False)
     model.load_state_dict(checkpoint["model"])
@@ -392,30 +562,45 @@ def start_inference(opt, domain=None):
 
     logger.info("Starting inference...")
     with torch.no_grad():
-        metrics, eval_loss_meters, latest_file_paths = \
-            eval_epoch(epoch_i, model, eval_dataset, opt, save_submission_filename, criterion)
+        metrics, eval_loss_meters, latest_file_paths = eval_epoch(
+            epoch_i, model, eval_dataset, opt, save_submission_filename, criterion
+        )
 
-    if opt.eval_split_name == 'val':
-        logger.info("metrics_no_nms {}".format(pprint.pformat(metrics["brief"], indent=4)))
+    if opt.eval_split_name == "val":
+        logger.info(
+            "metrics_no_nms {}".format(pprint.pformat(metrics["brief"], indent=4))
+        )
 
 
 def check_valid_combination(dataset, feature, domain):
     dataset_feature_map = {
-        'qvhighlight': ['resnet_glove', 'clip', 'clip_slowfast', 'clip_slowfast_pann'],
-        'qvhighlight_pretrain': ['resnet_glove', 'clip', 'clip_slowfast', 'clip_slowfast_pann'],
-        'activitynet': ['resnet_glove', 'clip', 'clip_slowfast'],
-        'charades': ['resnet_glove', 'clip', 'clip_slowfast'],
-        'tacos': ['resnet_glove', 'clip', 'clip_slowfast'],
-        'tvsum': ['resnet_glove', 'clip', 'clip_slowfast', 'i3d_clip'],
-        'youtube_highlight': ['clip', 'clip_slowfast'],
-        'clotho-moment': ['clap'],
-        'unav100-subset': ['clap'],
-        'castella': ['clap'],
+        "qvhighlight": ["resnet_glove", "clip", "clip_slowfast", "clip_slowfast_pann"],
+        "qvhighlight_pretrain": [
+            "resnet_glove",
+            "clip",
+            "clip_slowfast",
+            "clip_slowfast_pann",
+        ],
+        "activitynet": ["resnet_glove", "clip", "clip_slowfast"],
+        "charades": ["resnet_glove", "clip", "clip_slowfast"],
+        "tacos": ["resnet_glove", "clip", "clip_slowfast"],
+        "tvsum": ["resnet_glove", "clip", "clip_slowfast", "i3d_clip"],
+        "youtube_highlight": ["clip", "clip_slowfast"],
+        "clotho-moment": ["clap"],
+        "unav100-subset": ["clap"],
+        "castella": ["clap"],
     }
 
     domain_map = {
-        'tvsum': ['BK', 'BT', 'DS', 'FM', 'GA', 'MS', 'PK', 'PR', 'VT', 'VU'],
-        'youtube_highlight': ['dog', 'gymnastics', 'parkour', 'skating', 'skiing', 'surfing'],
+        "tvsum": ["BK", "BT", "DS", "FM", "GA", "MS", "PK", "PR", "VT", "VU"],
+        "youtube_highlight": [
+            "dog",
+            "gymnastics",
+            "parkour",
+            "skating",
+            "skiing",
+            "surfing",
+        ],
     }
 
     if dataset in domain_map:
@@ -424,32 +609,101 @@ def check_valid_combination(dataset, feature, domain):
         return feature in dataset_feature_map[dataset]
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', '-m', type=str, required=True, 
-                        choices=['moment_detr', 'qd_detr', 'eatr', 'cg_detr', 'uvcom', 'tr_detr', 'taskweave_hd2mr', 'taskweave_mr2hd'],
-                        help='model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, tr_detr, taskweave_hd2mr, taskweave_mr2hd]')
-    parser.add_argument('--dataset', '-d', type=str, required=True,
-                        choices=['activitynet', 'charades', 'qvhighlight', 'qvhighlight_pretrain', 'tacos', 'tvsum', 'youtube_highlight', 'clotho-moment', 'unav100-subset', 'tut2017', 'castella'],
-                        help='dataset name. select from [activitynet, charades, qvhighlight, qvhighlight_pretrain, tacos, tvsum, youtube_highlight, clotho-moment, unav100-subset, tut2017, castella]')
-    parser.add_argument('--feature', '-f', type=str, required=True,
-                        choices=['resnet_glove', 'clip', 'clip_slowfast', 'clip_slowfast_pann', 'i3d_clip', 'clap'],
-                        help='feature name. select from [resnet_glove, clip, clip_slowfast, clip_slowfast_pann, i3d_clip, clap].'
-                             'NOTE: i3d_clip and clip_slowfast_pann are only for TVSum and QVHighlight, respectively')
-    parser.add_argument('--model_path', type=str, required=True, help='saved model path')
-    parser.add_argument('--split', type=str, required=True, choices=['val', 'test'], help='val or test')
-    parser.add_argument('--eval_path', type=str, required=True, help='evaluation data')
-    parser.add_argument('--domain', '-dm', type=str,
-                        choices=['BK', 'BT', 'DS', 'FM', 'GA', 'MS', 'PK', 'PR', 'VT', 'VU',
-                                 'dog', 'gymnastics', 'parkour', 'skating', 'skiing', 'surfing'],
-                        help='domain for highlight detection dataset (e.g., BK for TVSum, dog for YouTube Highlight).')
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        required=True,
+        choices=[
+            "moment_detr",
+            "qd_detr",
+            "eatr",
+            "cg_detr",
+            "uvcom",
+            "tr_detr",
+            "taskweave_hd2mr",
+            "taskweave_mr2hd",
+        ],
+        help="model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, tr_detr, taskweave_hd2mr, taskweave_mr2hd]",
+    )
+    parser.add_argument(
+        "--dataset",
+        "-d",
+        type=str,
+        required=True,
+        choices=[
+            "activitynet",
+            "charades",
+            "qvhighlight",
+            "qvhighlight_pretrain",
+            "tacos",
+            "tvsum",
+            "youtube_highlight",
+            "clotho-moment",
+            "unav100-subset",
+            "tut2017",
+            "castella",
+        ],
+        help="dataset name. select from [activitynet, charades, qvhighlight, qvhighlight_pretrain, tacos, tvsum, youtube_highlight, clotho-moment, unav100-subset, tut2017, castella]",
+    )
+    parser.add_argument(
+        "--feature",
+        "-f",
+        type=str,
+        required=True,
+        choices=[
+            "resnet_glove",
+            "clip",
+            "clip_slowfast",
+            "clip_slowfast_pann",
+            "i3d_clip",
+            "clap",
+        ],
+        help="feature name. select from [resnet_glove, clip, clip_slowfast, clip_slowfast_pann, i3d_clip, clap]."
+        "NOTE: i3d_clip and clip_slowfast_pann are only for TVSum and QVHighlight, respectively",
+    )
+    parser.add_argument(
+        "--model_path", type=str, required=True, help="saved model path"
+    )
+    parser.add_argument(
+        "--split", type=str, required=True, choices=["val", "test"], help="val or test"
+    )
+    parser.add_argument("--eval_path", type=str, required=True, help="evaluation data")
+    parser.add_argument(
+        "--domain",
+        "-dm",
+        type=str,
+        choices=[
+            "BK",
+            "BT",
+            "DS",
+            "FM",
+            "GA",
+            "MS",
+            "PK",
+            "PR",
+            "VT",
+            "VU",
+            "dog",
+            "gymnastics",
+            "parkour",
+            "skating",
+            "skiing",
+            "surfing",
+        ],
+        help="domain for highlight detection dataset (e.g., BK for TVSum, dog for YouTube Highlight).",
+    )
 
     args = parser.parse_args()
     is_valid = check_valid_combination(args.dataset, args.feature, args.domain)
 
     if is_valid:
         resume = False
-        option_manager = BaseOptions(args.model, args.dataset, args.feature, resume, args.domain)
+        option_manager = BaseOptions(
+            args.model, args.dataset, args.feature, resume, args.domain
+        )
         option_manager.parse()
         opt = option_manager.option
         os.makedirs(opt.results_dir, exist_ok=True)
@@ -458,6 +712,10 @@ if __name__ == '__main__':
         opt.eval_split_name = args.split
         opt.eval_path = args.eval_path
         start_inference(opt, domain=args.domain)
-    
+
     else:
-        raise ValueError('The combination of dataset and feature is invalid: dataset={}, feature={}'.format(args.dataset, args.feature))
+        raise ValueError(
+            "The combination of dataset and feature is invalid: dataset={}, feature={}".format(
+                args.dataset, args.feature
+            )
+        )
