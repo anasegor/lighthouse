@@ -154,7 +154,7 @@ class StartEndDataset(Dataset):
         model_inputs["audio_feat"] = self._get_audio_feat_by_vid(meta["vid"])
         ctx_l = len(model_inputs["audio_feat"])
 
-        model_inputs["target_audio_global"] = self._get_global_audio_feat_by_vid(meta["vid"])
+        # model_inputs["target_audio_global"] = self._get_global_audio_feat_by_vid(meta["vid"])
 
         if self.use_tef:
             tef_st = torch.arange(0, ctx_l, 1.0) / ctx_l
@@ -169,7 +169,7 @@ class StartEndDataset(Dataset):
 
         if self.eval_mode and self.num_distractors > 0:
             # Получаем дистракторы
-            distractor_vids, distractor_embs = self._get_random_distractor_vids_and_embs(meta["vid"], self.num_distractors)
+            distractor_vids, distractor_embs = self._get_random_distractor_feat(meta["vid"], self.num_distractors)
             # Глобальный эмбеддинг таргета
             target_global = self.global_emb_cache[meta["vid"]] if hasattr(self, 'global_emb_cache') else self._get_global_audio_feat_by_vid(meta["vid"])
             model_inputs["query_global"] = self._get_query_global_feat_by_qid(meta["qid"])
@@ -364,13 +364,13 @@ class StartEndDataset(Dataset):
         emb = l2_normalize_np_array(emb)
         return torch.from_numpy(emb)
 
-    def _get_random_distractor_embeddings(self, cur_vid, num):
+    def _get_random_distractor_feat(self, cur_vid, num):
         candidates = [v for v in self.all_vids if v != cur_vid]
         if len(candidates) < num:
             chosen = random.choices(candidates, k=num)
         else:
             chosen = random.sample(candidates, k=num)
-        embs = [self.global_emb_cache[v] for v in chosen] if hasattr(self, 'global_emb_cache') else [self._get_global_audio_embedding_by_vid(v) for v in chosen]
+        embs = [self.global_emb_cache[v] for v in chosen] if hasattr(self, 'global_emb_cache') else [self._get_global_audio_feat_by_vid(v) for v in chosen]
         return chosen, embs
     
     def _get_query_feat_by_qid(self, qid):
