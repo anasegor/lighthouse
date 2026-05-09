@@ -362,7 +362,7 @@ class StartEndDataset(Dataset):
         with np.load(feat_path) as data:
             emb = data[self.global_audio_key].astype(np.float32)
         emb = l2_normalize_np_array(emb)
-        return torch.from_numpy(emb)
+        return emb
 
     def _get_random_distractor_feat(self, cur_vid, num):
         candidates = [v for v in self.all_vids if v != cur_vid]
@@ -370,7 +370,10 @@ class StartEndDataset(Dataset):
             chosen = random.choices(candidates, k=num)
         else:
             chosen = random.sample(candidates, k=num)
-        embs = [self.global_emb_cache[v] for v in chosen] if hasattr(self, 'global_emb_cache') else [self._get_global_audio_feat_by_vid(v) for v in chosen]
+        if hasattr(self, 'global_emb_cache'):
+            embs = [self.global_emb_cache[v] for v in chosen]   # numpy
+        else:
+            embs = [self._get_global_audio_feat_by_vid(v) for v in chosen]
         return chosen, embs
     
     def _get_query_feat_by_qid(self, qid):
@@ -423,24 +426,21 @@ def start_end_collate(batch):
         elif k == "saliency_all_labels":
             pad_data, _ = pad_sequences_1d([e["model_inputs"][k] for e in batch], dtype=np.float32, fixed_length=None)
             batched_data[k] = torch.tensor(pad_data, dtype=torch.float32)
-        
-        # ----- Новые поля для ранжирования -----
+
         elif k == "target_audio_global":
-            # каждый элемент: тензор (D,) -> стек в (batch, D)
-            batched_data[k] = torch.stack([e["model_inputs"][k] for e in batch])
+            batched_data[k] = torch.stack([e["model_inputs"][k] for e in batch])  # (batch, D)
         
+        elif k == "query_global":
+            batched_data[k] = torch.stack([e["model_inputs"][k] for e in batch])  # (batch, D)
+
         elif k == "distractor_audios_global":
-            # каждый элемент: список из N тензоров (D,)
-            # преобразуем в тензор (batch, N, D)
             distractors_list = [e["model_inputs"][k] for e in batch]
             batched_data[k] = torch.stack([torch.stack(lst) for lst in distractors_list])
         
         elif k in ["distractor_vids", "candidate_vids", "target_vid"]:
-            # списки строк или строки – оставляем как список списков/строк
             batched_data[k] = [e["model_inputs"][k] for e in batch]
         
         else:
-            # Все остальные ключи (query_feat, audio_feat, video_feat и т.д.)
             batched_data[k] = pad_sequences_1d(
                 [e["model_inputs"][k] for e in batch], dtype=torch.float32, fixed_length=None)
     

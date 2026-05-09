@@ -86,7 +86,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
-
 def eval_epoch_post_processing(submission, opt, gt_data, save_submission_filename):
     logger.info("Saving/Evaluating before nms results")
     submission_path = os.path.join(opt.results_dir, save_submission_filename)
@@ -219,20 +218,18 @@ def compute_mr_results_with_retrieval(
             meta = query_meta[i]
 
             text_emb = batch_inputs["query_global"][i]
+            if text_emb.dim() > 1:
+                text_emb = text_emb.squeeze(0)    
             query_feat_padded = batch_inputs["query_feat"][0][i]  # (max_len, D)
             query_mask = batch_inputs["query_feat"][1][i]  # (max_len,)
 
-            target_global = batch_inputs["target_audio_global"][i]  # tensor (D,)
-            distractor_globals = batch_inputs["distractor_audios_global"][
-                i
-            ]  # list of tensors
+            target_global = batch_inputs["target_audio_global"][i]  # (D,)
+            distractor_globals = batch_inputs["distractor_audios_global"][i]  # (N, D)
             candidate_vids = batch_inputs["candidate_vids"][i]  # list of str
-            all_globals = torch.stack(
-                [target_global] + distractor_globals
-            )  # (N_cand, D)
+            all_globals = torch.cat([target_global.unsqueeze(0), distractor_globals], dim=0)  # (1+N, D)
             all_globals = F.normalize(all_globals, dim=1)
 
-            cos_scores = torch.matmul(all_globals, text_emb)  # (N_cand,)
+            cos_scores = torch.matmul(all_globals, text_emb)  # (1+N,)
             print(f"Query: {meta['qid']} - {meta['query'][:50]}...")
             print(f"Target vid: {meta['vid']}")
             print("\nAll candidates (vid, cos_score):")
