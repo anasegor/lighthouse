@@ -595,11 +595,12 @@ def start_inference(opt, domain=None):
         logger.info(
             "metrics_no_nms {}".format(pprint.pformat(metrics["brief"], indent=4))
         )
-        logger.info(
-            "metrics_multiple_retrieval {}".format(
-                pprint.pformat(metrics["retrieval"], indent=4)
+        if "retrieval" in metrics:
+            logger.info(
+                "metrics_multiple_retrieval {}".format(
+                    pprint.pformat(metrics["retrieval"], indent=4)
+                )
             )
-        )
 
 
 def check_valid_combination(dataset, feature, domain):
