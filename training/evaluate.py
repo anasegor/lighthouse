@@ -86,6 +86,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+
 def eval_epoch_post_processing(submission, opt, gt_data, save_submission_filename):
     logger.info("Saving/Evaluating before nms results")
     submission_path = os.path.join(opt.results_dir, save_submission_filename)
@@ -208,10 +209,11 @@ def compute_mr_results_with_retrieval(
         criterion.eval()
 
     mr_res = []
-    for batch in tqdm(eval_loader, desc="Retrieval + Localization"):
-        query_meta = batch[0]  # список метаданных (batch_size)
-        batch_inputs = batch[1]
+    retrieval_stats = []  # для хранения (qid, rank) для каждого примера
 
+    for batch in tqdm(eval_loader, desc="Retrieval + Localization"):
+        query_meta = batch[0]
+        batch_inputs = batch[1]
         batch_size = len(query_meta)
 
         for i in range(batch_size):
@@ -219,19 +221,41 @@ def compute_mr_results_with_retrieval(
 
             text_emb = batch_inputs["query_global"][i]
             if text_emb.dim() > 1:
-                text_emb = text_emb.squeeze(0)    
-            query_feat_padded = batch_inputs["query_feat"][0][i]  # (max_len, D)
-            query_mask = batch_inputs["query_feat"][1][i]  # (max_len,)
+                text_emb = text_emb.squeeze(0)
+            query_feat_padded = batch_inputs["query_feat"][0][i]
+            query_mask = batch_inputs["query_feat"][1][i]
 
-            target_global = batch_inputs["target_audio_global"][i]  # (D,)
-            distractor_globals = batch_inputs["distractor_audios_global"][i]  # (N, D)
-            candidate_vids = batch_inputs["candidate_vids"][i]  # list of str
-            all_globals = torch.cat([target_global.unsqueeze(0), distractor_globals], dim=0)  # (1+N, D)
+            target_global = batch_inputs["target_audio_global"][i]
+            distractor_globals = batch_inputs["distractor_audios_global"][i]
+            candidate_vids = batch_inputs["candidate_vids"][i]
+
+            all_globals = torch.cat(
+                [target_global.unsqueeze(0), distractor_globals], dim=0
+            )
             all_globals = F.normalize(all_globals, dim=1)
-
             cos_scores = torch.matmul(all_globals, text_emb)  # (1+N,)
+
+            # ---- Ранжирование для метрик retrieval ----
+            target_vid = meta["vid"]
+            try:
+                target_idx = candidate_vids.index(
+                    target_vid
+                )  # индекс в списке кандидатов
+            except ValueError:
+                target_idx = -1
+            if target_idx != -1:
+                # сортируем по убыванию cos_scores
+                sorted_indices = (
+                    torch.argsort(cos_scores, descending=True).cpu().tolist()
+                )
+                target_rank = sorted_indices.index(target_idx)  # 0-based
+            else:
+                target_rank = len(candidate_vids)  # не нашли – самый плохой ранг
+            retrieval_stats.append((meta["qid"], target_rank))
+
+            # Логирование (опционально)
             print(f"Query: {meta['qid']} - {meta['query'][:50]}...")
-            print(f"Target vid: {meta['vid']}")
+            print(f"Target vid: {target_vid}")
             print("\nAll candidates (vid, cos_score):")
             for idx, vid in enumerate(candidate_vids):
                 print(f"  {idx}: {vid} -> {cos_scores[idx].item():.4f}")
@@ -243,9 +267,9 @@ def compute_mr_results_with_retrieval(
             print(f"\nTop-{top_k} candidates by cosine:")
             for rank, (idx, score) in enumerate(zip(topk_idx, topk_vals)):
                 print(f"  {rank+1}: {candidate_vids[idx]} (cos={score.item():.4f})")
+
             best_combined = -float("inf")
             best_pred = None
-
             use_tef = "tef" in opt.ctx_mode
 
             for k_idx in topk_idx:
@@ -253,15 +277,14 @@ def compute_mr_results_with_retrieval(
                 print(
                     f"\n--- Evaluating candidate: {cand_vid} (cos={cos_scores[k_idx].item():.4f})"
                 )
-                temp_feat = eval_loader.dataset._get_audio_feat_by_vid(
-                    cand_vid
-                )  # (L, D)
+                temp_feat = eval_loader.dataset._get_audio_feat_by_vid(cand_vid)
                 ctx_l = len(temp_feat)
+
                 if use_tef:
                     tef_st = torch.arange(0, ctx_l, 1.0) / ctx_l
                     tef_ed = tef_st + 1.0 / ctx_l
                     tef = torch.stack([tef_st, tef_ed], dim=1).to(opt.device)
-                    src_vid = tef.unsqueeze(0)  # (1, L, 2)
+                    src_vid = tef.unsqueeze(0)
                     src_vid_mask = torch.ones(
                         1, ctx_l, dtype=torch.long, device=opt.device
                     )
@@ -269,11 +292,9 @@ def compute_mr_results_with_retrieval(
                     src_vid = None
                     src_vid_mask = None
 
-                src_aud = temp_feat.unsqueeze(0).to(opt.device)  # (1, L, D)
+                src_aud = temp_feat.unsqueeze(0).to(opt.device)
                 src_aud_mask = torch.ones(1, ctx_l, dtype=torch.long, device=opt.device)
-                src_txt = query_feat_padded.unsqueeze(0).to(
-                    opt.device
-                )  # (1, max_len, D)
+                src_txt = query_feat_padded.unsqueeze(0).to(opt.device)
                 src_txt_mask = query_mask.unsqueeze(0).to(opt.device)
 
                 model_inputs = {
@@ -286,9 +307,8 @@ def compute_mr_results_with_retrieval(
                 }
                 outputs = model(**model_inputs)
 
-                prob = F.softmax(outputs["pred_logits"], -1)  # (1, #queries, 2)
-                loc_score = prob[..., 0].max().item()  # foreground score
-
+                prob = F.softmax(outputs["pred_logits"], -1)
+                loc_score = prob[..., 0].max().item()
                 cos_val = cos_scores[k_idx].item()
                 combined = alpha * cos_val + (1 - alpha) * loc_score
                 print(
@@ -297,8 +317,8 @@ def compute_mr_results_with_retrieval(
 
                 if combined > best_combined:
                     best_combined = combined
-                    pred_spans = outputs["pred_spans"].cpu()  # (1, #queries, 2)
-                    scores = prob[..., 0].cpu()  # (1, #queries)
+                    pred_spans = outputs["pred_spans"].cpu()
+                    scores = prob[..., 0].cpu()
                     spans = span_cxw_to_xx(pred_spans[0]) * meta["duration"]
                     cur_ranked_preds = torch.cat(
                         [spans, scores[0][:, None]], dim=1
@@ -328,6 +348,19 @@ def compute_mr_results_with_retrieval(
                     )
                 )
 
+    # ----- Вычисление метрик ранжирования -----
+    retrieval_metrics = {}
+    if retrieval_stats:
+        ranks = [rank for _, rank in retrieval_stats]
+        total = len(ranks)
+        for k in [1, 5, 10]:
+            recall_k = sum(1 for r in ranks if r < k) / total
+            retrieval_metrics[f"Retrieval_Recall@{k}"] = float(f"{recall_k * 100:.2f}")
+        # Mean Reciprocal Rank
+        mrr = sum(1.0 / (r + 1) for r in ranks) / total
+        retrieval_metrics["Retrieval_MRR"] = float(f"{mrr * 100:.2f}")
+
+    # Постпроцессинг моментов
     post_processor = PostProcessorDETR(
         clip_length=opt.clip_length,
         min_ts_val=0,
@@ -338,7 +371,7 @@ def compute_mr_results_with_retrieval(
         process_func_names=("clip_ts", "round_multiple"),
     )
     mr_res = post_processor(mr_res)
-    return mr_res, {}
+    return mr_res, retrieval_metrics
 
 
 @torch.no_grad()
@@ -446,17 +479,24 @@ def eval_epoch(
             num_workers=opt.num_workers,
             shuffle=False,
         )
-        submission, eval_loss_meters = compute_mr_results_with_retrieval(
+        submission, retrieval_metrics = compute_mr_results_with_retrieval(
             epoch_i,
             model,
             eval_loader,
             opt,
             criterion,
-            alpha=0.5,
-            top_k=3,
+            alpha=opt.retrieval_alpha,
+            top_k=opt.top_k_retrieval,
         )
+        # Обычные метрики локализации
+        metrics, latest_file_paths = eval_epoch_post_processing(
+            submission, opt, eval_dataset.data, save_submission_filename
+        )
+        # Добавляем метрики ранжирования
+        if retrieval_metrics:
+            metrics["retrieval"] = retrieval_metrics
+        return metrics, {}, latest_file_paths
     else:
-        # Стандартный путь
         eval_loader = DataLoader(
             eval_dataset,
             collate_fn=collate_fn,
@@ -467,11 +507,11 @@ def eval_epoch(
         submission, eval_loss_meters = get_eval_res(
             epoch_i, model, eval_loader, opt, criterion
         )
+        metrics, latest_file_paths = eval_epoch_post_processing(
+            submission, opt, eval_dataset.data, save_submission_filename
+        )
 
-    metrics, latest_file_paths = eval_epoch_post_processing(
-        submission, opt, eval_dataset.data, save_submission_filename
-    )
-    return metrics, eval_loss_meters, latest_file_paths
+        return metrics, eval_loss_meters, latest_file_paths
 
 
 def build_model(opt):

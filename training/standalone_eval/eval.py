@@ -57,11 +57,14 @@ def compute_average_precision_detection_wrapper(
 def compute_mr_ap(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10),
                   max_gt_windows=None, max_pred_windows=10, num_workers=8, chunksize=50):
     iou_thds = [float(f"{e:.2f}") for e in iou_thds]
+    qid2target_vid = {d["qid"]: d["vid"] for d in ground_truth}
     pred_qid2data = defaultdict(list)
     for d in submission:
+        qid = d["qid"]
+        if d.get("vid") != qid2target_vid.get(qid, None):
+            continue
         pred_windows = d["pred_relevant_windows"][:max_pred_windows] \
             if max_pred_windows is not None else d["pred_relevant_windows"]
-        qid = d["qid"]
         for w in pred_windows:
             pred_qid2data[qid].append({
                 "video-id": d["qid"],
@@ -82,7 +85,17 @@ def compute_mr_ap(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10),
                 "t-end": w[1]
             })
     qid2ap_list = {}
-    data_triples = [[qid, gt_qid2data[qid], pred_qid2data[qid]] for qid in pred_qid2data]
+    data_triples = []
+    for qid, gt_data in gt_qid2data.items():
+        if qid in pred_qid2data and len(pred_qid2data[qid]) > 0:
+            data_triples.append([qid, gt_data, pred_qid2data[qid]])
+
+    if len(data_triples) == 0:
+        ap_thds = np.zeros(len(iou_thds))
+        iou_thd2ap = {str(thd): 0.0 for thd in iou_thds}
+        iou_thd2ap["average"] = 0.0
+        return {k: float(f"{100 * v:.2f}") for k, v in iou_thd2ap.items()}
+    
     from functools import partial
     compute_ap_from_triple = partial(
         compute_average_precision_detection_wrapper, tiou_thresholds=iou_thds)
@@ -106,26 +119,42 @@ def compute_mr_ap(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10),
 
 def compute_mr_r1(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10)):
     iou_thds = [float(f"{e:.2f}") for e in iou_thds]
-    pred_qid2window = {d["qid"]: d["pred_relevant_windows"][0][:2] for d in submission}
-    gt_qid2window = {}
-    for d in ground_truth:
-        cur_gt_windows = d["relevant_windows"]
-        cur_qid = d["qid"]
-        cur_max_iou_idx = 0
-        if len(cur_gt_windows) > 0:
-            cur_ious = compute_temporal_iou_batch_cross(
-                np.array([pred_qid2window[cur_qid]]), np.array(d["relevant_windows"])
-            )[0]
-            cur_max_iou_idx = np.argmax(cur_ious)
-        gt_qid2window[cur_qid] = cur_gt_windows[cur_max_iou_idx]
+    qid2target_vid = {d["qid"]: d["vid"] for d in ground_truth}
+    qid2pred_window = {}
+    for d in submission:
+        qid = d["qid"]
+        if d.get("vid") != qid2target_vid.get(qid, None):
+            continue
+        qid2pred_window[qid] = d["pred_relevant_windows"][0][:2]
 
-    qids = list(pred_qid2window.keys())
-    pred_windows = np.array([pred_qid2window[k] for k in qids]).astype(float)
-    gt_windows = np.array([gt_qid2window[k] for k in qids]).astype(float)
+    qid2gt_window = {}
+    for d in ground_truth:
+        qid = d["qid"]
+        cur_gt_windows = d["relevant_windows"]
+        if len(cur_gt_windows) == 0:
+            qid2gt_window[qid] = [0.0, 0.0]
+            continue
+        if qid in qid2pred_window:
+            pred_win = qid2pred_window[qid]
+            ious = compute_temporal_iou_batch_cross(
+                np.array([pred_win]), np.array(cur_gt_windows)
+            )[0]
+            best_idx = np.argmax(ious)
+            qid2gt_window[qid] = cur_gt_windows[best_idx]
+        else:
+            qid2gt_window[qid] = cur_gt_windows[0]
+
+    qids = [qid for qid in qid2pred_window.keys() if qid in qid2gt_window]
+    if len(qids) == 0:
+        return {str(thd): 0.0 for thd in iou_thds}
+
+    pred_windows = np.array([qid2pred_window[qid] for qid in qids]).astype(float)
+    gt_windows = np.array([qid2gt_window[qid] for qid in qids]).astype(float)
     pred_gt_iou = compute_temporal_iou_batch_paired(pred_windows, gt_windows)
+
     iou_thd2recall_at_one = {}
     for thd in iou_thds:
-        iou_thd2recall_at_one[str(thd)] = float(f"{np.mean(pred_gt_iou >= thd) * 100:.2f}")
+        iou_thd2recall_at_one[str(thd)] = float(f"{100 * np.mean(pred_gt_iou >= thd):.2f}")
     return iou_thd2recall_at_one
 
 
