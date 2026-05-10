@@ -351,6 +351,7 @@ def compute_mr_results_with_retrieval(
     # ----- Вычисление метрик ранжирования -----
     retrieval_metrics = {}
     if retrieval_stats:
+        print({"Retrieval Stats (qid, rank)": retrieval_stats})
         ranks = [rank for _, rank in retrieval_stats]
         total = len(ranks)
         for k in [1, 5, 10]:
@@ -485,8 +486,8 @@ def eval_epoch(
             eval_loader,
             opt,
             criterion,
-            alpha=opt.retrieval_alpha,
-            top_k=opt.top_k_retrieval,
+            alpha=0.9,
+            top_k=5,
         )
         # Обычные метрики локализации
         metrics, latest_file_paths = eval_epoch_post_processing(
@@ -606,6 +607,9 @@ def start_inference(opt, domain=None):
     if opt.eval_split_name == "val":
         logger.info(
             "metrics_no_nms {}".format(pprint.pformat(metrics["brief"], indent=4))
+        )
+        logger.info(
+            "metrics_multiple_retrieval {}".format(pprint.pformat(metrics["retrieval"], indent=4))
         )
 
 
