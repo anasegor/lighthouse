@@ -468,18 +468,14 @@ def eval_epoch(
     if criterion is not None:
         criterion.eval()
 
-    if (
-        hasattr(eval_dataset, "eval_mode")
-        and eval_dataset.eval_mode
-        and eval_dataset.num_distractors > 0
-    ):
-        eval_loader = DataLoader(
-            eval_dataset,
-            collate_fn=collate_fn,
-            batch_size=1,
-            num_workers=opt.num_workers,
-            shuffle=False,
-        )
+    eval_loader = DataLoader(
+        eval_dataset,
+        collate_fn=collate_fn,
+        batch_size=opt.eval_bsz,
+        num_workers=opt.num_workers,
+        shuffle=False,
+    )
+    if opt.num_distractors > 0:
         submission, retrieval_metrics = compute_mr_results_with_retrieval(
             epoch_i,
             model,
@@ -487,24 +483,15 @@ def eval_epoch(
             opt,
             criterion,
             alpha=0.9,
-            top_k=5,
+            top_k=3,
         )
-        # Обычные метрики локализации
         metrics, latest_file_paths = eval_epoch_post_processing(
             submission, opt, eval_dataset.data, save_submission_filename
         )
-        # Добавляем метрики ранжирования
         if retrieval_metrics:
             metrics["retrieval"] = retrieval_metrics
         return metrics, {}, latest_file_paths
     else:
-        eval_loader = DataLoader(
-            eval_dataset,
-            collate_fn=collate_fn,
-            batch_size=opt.eval_bsz,
-            num_workers=opt.num_workers,
-            shuffle=False,
-        )
         submission, eval_loss_meters = get_eval_res(
             epoch_i, model, eval_loader, opt, criterion
         )
@@ -587,7 +574,7 @@ def start_inference(opt, domain=None):
     eval_dataset = (
         CGDETR_StartEndDataset(**dataset_config)
         if opt.model_name == "cg_detr"
-        else StartEndDataset(**dataset_config, num_distractors=10, eval_mode=True)
+        else StartEndDataset(**dataset_config, num_distractors=opt.num_distractors)
     )
     model, criterion, _, _ = setup_model(opt)
     checkpoint = torch.load(opt.model_path, weights_only=False)
@@ -609,7 +596,9 @@ def start_inference(opt, domain=None):
             "metrics_no_nms {}".format(pprint.pformat(metrics["brief"], indent=4))
         )
         logger.info(
-            "metrics_multiple_retrieval {}".format(pprint.pformat(metrics["retrieval"], indent=4))
+            "metrics_multiple_retrieval {}".format(
+                pprint.pformat(metrics["retrieval"], indent=4)
+            )
         )
 
 
@@ -736,6 +725,12 @@ if __name__ == "__main__":
         ],
         help="domain for highlight detection dataset (e.g., BK for TVSum, dog for YouTube Highlight).",
     )
+    parser.add_argument(
+        "--num_distractors",
+        type=int,
+        default=0,
+        help="number of distractor audios for retrieval",
+    )
 
     args = parser.parse_args()
     is_valid = check_valid_combination(args.dataset, args.feature, args.domain)
@@ -752,6 +747,7 @@ if __name__ == "__main__":
         opt.model_path = args.model_path
         opt.eval_split_name = args.split
         opt.eval_path = args.eval_path
+        opt.num_distractors = args.num_distractors
         start_inference(opt, domain=args.domain)
 
     else:
