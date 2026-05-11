@@ -588,13 +588,12 @@ class StartEndDataset(Dataset):
             embs = [self._get_global_audio_feat_by_vid(v) for v in chosen]
         return chosen, embs
 
-    def _get_query_feat_by_qid(self, qid):
+    def _get_query_global_feat_by_qid(self, qid):
         q_feat_path = join(self.q_feat_dir, f"qid{qid}.npz")
-        q_feat = np.load(q_feat_path)[self.q_feat_type].astype(np.float32)
-        if self.q_feat_type == "last_hidden_state":
-            q_feat = q_feat[: self.max_q_l]
-        q_feat = l2_normalize_np_array(q_feat)
-        return torch.from_numpy(q_feat)  # (D, ) or (Lq, D)
+        with np.load(q_feat_path) as data:
+            proj = data[self.q_global_key].astype(np.float32)
+        proj = l2_normalize_np_array(proj)
+        return torch.from_numpy(proj)  # (D_proj,)
 
     def _get_query_feat_by_qid(self, qid):
         if self.dset_name == "tvsum" or self.dset_name == "youtube_highlight":
