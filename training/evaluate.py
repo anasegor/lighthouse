@@ -219,14 +219,14 @@ def compute_mr_results_with_retrieval(
         for i in range(batch_size):
             meta = query_meta[i]
 
-            text_emb = batch_inputs["query_global"][i]
+            text_emb = batch_inputs["query_proj_feat"][i]
             if text_emb.dim() > 1:
                 text_emb = text_emb.squeeze(0)
             query_feat_padded = batch_inputs["query_feat"][0][i]
             query_mask = batch_inputs["query_feat"][1][i]
 
-            target_global = batch_inputs["target_audio_global"][i]
-            distractor_globals = batch_inputs["distractor_audios_global"][i]
+            target_global = batch_inputs["target_audio_global_feat"][i]
+            distractor_globals = batch_inputs["distractor_audios_global_feat"][i]
             candidate_vids = batch_inputs["candidate_vids"][i]
 
             all_globals = torch.cat(
