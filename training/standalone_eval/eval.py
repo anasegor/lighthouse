@@ -42,74 +42,100 @@ import json
 import time
 import copy
 import multiprocessing as mp
-from standalone_eval.utils import compute_average_precision_detection, \
-    compute_temporal_iou_batch_cross, compute_temporal_iou_batch_paired, load_jsonl, get_ap
+from standalone_eval.utils import (
+    compute_average_precision_detection,
+    compute_temporal_iou_batch_cross,
+    compute_temporal_iou_batch_paired,
+    load_jsonl,
+    get_ap,
+)
 
 
 def compute_average_precision_detection_wrapper(
-        input_triple, tiou_thresholds=np.linspace(0.5, 0.95, 10)):
+    input_triple, tiou_thresholds=np.linspace(0.5, 0.95, 10)
+):
     qid, ground_truth, prediction = input_triple
     scores = compute_average_precision_detection(
-        ground_truth, prediction, tiou_thresholds=tiou_thresholds)
+        ground_truth, prediction, tiou_thresholds=tiou_thresholds
+    )
     return qid, scores
 
 
-def compute_mr_ap(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10),
-                  max_gt_windows=None, max_pred_windows=10, num_workers=8, chunksize=50):
+def compute_mr_ap(
+    submission,
+    ground_truth,
+    iou_thds=np.linspace(0.5, 0.95, 10),
+    max_gt_windows=None,
+    max_pred_windows=10,
+    num_workers=8,
+    chunksize=50,
+):
     iou_thds = [float(f"{e:.2f}") for e in iou_thds]
+
+    # Словарь target_vid для каждого qid
     qid2target_vid = {d["qid"]: d["vid"] for d in ground_truth}
+
+    # Построение предсказаний: только с правильным vid
     pred_qid2data = defaultdict(list)
     for d in submission:
         qid = d["qid"]
         if d.get("vid") != qid2target_vid.get(qid, None):
             continue
-        pred_windows = d["pred_relevant_windows"][:max_pred_windows] \
-            if max_pred_windows is not None else d["pred_relevant_windows"]
+        pred_windows = (
+            d["pred_relevant_windows"][:max_pred_windows]
+            if max_pred_windows is not None
+            else d["pred_relevant_windows"]
+        )
         for w in pred_windows:
-            pred_qid2data[qid].append({
-                "video-id": d["qid"],
-                "t-start": w[0],
-                "t-end": w[1],
-                "score": w[2]
-            })
+            pred_qid2data[qid].append(
+                {"video-id": qid, "t-start": w[0], "t-end": w[1], "score": w[2]}
+            )
 
+    # Ground truth для всех qid
     gt_qid2data = defaultdict(list)
     for d in ground_truth:
-        gt_windows = d["relevant_windows"][:max_gt_windows] \
-            if max_gt_windows is not None else d["relevant_windows"]
+        gt_windows = (
+            d["relevant_windows"][:max_gt_windows]
+            if max_gt_windows is not None
+            else d["relevant_windows"]
+        )
         qid = d["qid"]
         for w in gt_windows:
-            gt_qid2data[qid].append({
-                "video-id": d["qid"],
-                "t-start": w[0],
-                "t-end": w[1]
-            })
+            gt_qid2data[qid].append({"video-id": qid, "t-start": w[0], "t-end": w[1]})
+
+    # Собираем все qid из ground_truth
+    all_qids = set(gt_qid2data.keys())
     qid2ap_list = {}
-    data_triples = []
-    for qid, gt_data in gt_qid2data.items():
-        if qid in pred_qid2data and len(pred_qid2data[qid]) > 0:
-            data_triples.append([qid, gt_data, pred_qid2data[qid]])
 
-    if len(data_triples) == 0:
-        ap_thds = np.zeros(len(iou_thds))
-        iou_thd2ap = {str(thd): 0.0 for thd in iou_thds}
-        iou_thd2ap["average"] = 0.0
-        return {k: float(f"{100 * v:.2f}") for k, v in iou_thd2ap.items()}
-    
     from functools import partial
+
     compute_ap_from_triple = partial(
-        compute_average_precision_detection_wrapper, tiou_thresholds=iou_thds)
+        compute_average_precision_detection_wrapper, tiou_thresholds=iou_thds
+    )
 
-    if num_workers > 1:
-        with mp.Pool(num_workers) as pool:
-            for qid, scores in pool.imap_unordered(compute_ap_from_triple, data_triples, chunksize=chunksize):
+    # Для каждого qid: если есть предсказания с правильным vid, считаем AP, иначе AP = 0
+    data_triples = []
+    for qid in all_qids:
+        if qid in pred_qid2data and len(pred_qid2data[qid]) > 0:
+            data_triples.append([qid, gt_qid2data[qid], pred_qid2data[qid]])
+        else:
+            # Предсказания нет или vid не совпадает – AP = 0
+            qid2ap_list[qid] = np.zeros(len(iou_thds))
+
+    if data_triples:
+        if num_workers > 1:
+            with mp.Pool(num_workers) as pool:
+                for qid, scores in pool.imap_unordered(
+                    compute_ap_from_triple, data_triples, chunksize=chunksize
+                ):
+                    qid2ap_list[qid] = scores
+        else:
+            for data_triple in data_triples:
+                qid, scores = compute_ap_from_triple(data_triple)
                 qid2ap_list[qid] = scores
-    else:
-        for data_triple in data_triples:
-            qid, scores = compute_ap_from_triple(data_triple)
-            qid2ap_list[qid] = scores
 
-    ap_array = np.array(list(qid2ap_list.values()))
+    # Усредняем по всем qid (включая те, для которых AP=0)
+    ap_array = np.array(list(qid2ap_list.values()))  # (N_qids, len(iou_thds))
     ap_thds = ap_array.mean(0)
     iou_thd2ap = dict(zip([str(e) for e in iou_thds], ap_thds))
     iou_thd2ap["average"] = np.mean(ap_thds)
@@ -120,13 +146,17 @@ def compute_mr_ap(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10),
 def compute_mr_r1(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10)):
     iou_thds = [float(f"{e:.2f}") for e in iou_thds]
     qid2target_vid = {d["qid"]: d["vid"] for d in ground_truth}
+
+    # Берём только предсказания с правильным vid (первое предсказание)
     qid2pred_window = {}
     for d in submission:
         qid = d["qid"]
         if d.get("vid") != qid2target_vid.get(qid, None):
             continue
+        # Берём топ-1 предсказание (первый элемент в pred_relevant_windows)
         qid2pred_window[qid] = d["pred_relevant_windows"][0][:2]
 
+    # Ground truth окна (выбираем GT с максимальным IoU с предсказанием, если предсказание есть, иначе берём первое)
     qid2gt_window = {}
     for d in ground_truth:
         qid = d["qid"]
@@ -142,19 +172,30 @@ def compute_mr_r1(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10))
             best_idx = np.argmax(ious)
             qid2gt_window[qid] = cur_gt_windows[best_idx]
         else:
+            # Нет предсказания с правильным vid – берём первое GT (всё равно IoU=0)
             qid2gt_window[qid] = cur_gt_windows[0]
 
-    qids = [qid for qid in qid2pred_window.keys() if qid in qid2gt_window]
-    if len(qids) == 0:
-        return {str(thd): 0.0 for thd in iou_thds}
+    # Все qid из ground_truth
+    all_qids = set(qid2gt_window.keys())
+    # Для каждого qid: если есть предсказание с правильным vid, вычисляем IoU, иначе IoU = 0
+    gt_windows_list = []
+    pred_windows_list = []
+    for qid in all_qids:
+        gt_windows_list.append(qid2gt_window[qid])
+        if qid in qid2pred_window:
+            pred_windows_list.append(qid2pred_window[qid])
+        else:
+            pred_windows_list.append([0.0, 0.0])  # фиктивное предсказание (0,0) – IoU=0
 
-    pred_windows = np.array([qid2pred_window[qid] for qid in qids]).astype(float)
-    gt_windows = np.array([qid2gt_window[qid] for qid in qids]).astype(float)
+    pred_windows = np.array(pred_windows_list).astype(float)
+    gt_windows = np.array(gt_windows_list).astype(float)
     pred_gt_iou = compute_temporal_iou_batch_paired(pred_windows, gt_windows)
 
     iou_thd2recall_at_one = {}
     for thd in iou_thds:
-        iou_thd2recall_at_one[str(thd)] = float(f"{100 * np.mean(pred_gt_iou >= thd):.2f}")
+        iou_thd2recall_at_one[str(thd)] = float(
+            f"{100 * np.mean(pred_gt_iou >= thd):.2f}"
+        )
     return iou_thd2recall_at_one
 
 
@@ -171,7 +212,8 @@ def get_data_by_range(submission, ground_truth, len_range):
     gt_qids_in_range = set()
     for d in ground_truth:
         rel_windows_in_range = [
-            w for w in d["relevant_windows"] if min_l < get_window_len(w) <= max_l]
+            w for w in d["relevant_windows"] if min_l < get_window_len(w) <= max_l
+        ]
         if len(rel_windows_in_range) > 0:
             d = copy.deepcopy(d)
             d["relevant_windows"] = rel_windows_in_range
@@ -189,13 +231,30 @@ def get_data_by_range(submission, ground_truth, len_range):
 def eval_moment_retrieval(submission, ground_truth, verbose=True):
     # Определяем диапазоны длительности (в секундах)
     length_ranges = [
-        [0, 1500],   # full
-        [0, 10], [10, 20], [20, 30], [30, 40], [40, 50],
-        [50, 60], [60, 70], [70, 80], [80, 90], [90, 1500]
+        [0, 1500],  # full
+        [0, 10],
+        [10, 20],
+        [20, 30],
+        [30, 40],
+        [40, 50],
+        [50, 60],
+        [60, 70],
+        [70, 80],
+        [80, 90],
+        [90, 1500],
     ]
     range_names = [
-        "full", "0-10", "11-20", "21-30", "31-40", "41-50",
-        "51-60", "61-70", "71-80", "81-90", "90+"
+        "full",
+        "0-10",
+        "11-20",
+        "21-30",
+        "31-40",
+        "41-50",
+        "51-60",
+        "61-70",
+        "71-80",
+        "81-90",
+        "90+",
     ]
 
     ret_metrics = {}
@@ -204,9 +263,13 @@ def eval_moment_retrieval(submission, ground_truth, verbose=True):
     for l_range, name in zip(length_ranges, range_names):
         if verbose:
             start_time = time.time()
-        _submission, _ground_truth = get_data_by_range(submission, ground_truth, l_range)
-        print(f"{name}: {l_range}, {len(_ground_truth)}/{len(ground_truth)}="
-              f"{100*len(_ground_truth)/len(ground_truth):.2f} examples.")
+        _submission, _ground_truth = get_data_by_range(
+            submission, ground_truth, l_range
+        )
+        print(
+            f"{name}: {l_range}, {len(_ground_truth)}/{len(ground_truth)}="
+            f"{100*len(_ground_truth)/len(ground_truth):.2f} examples."
+        )
 
         # Если после фильтрации не осталось данных, заполняем нулями
         if len(_ground_truth) == 0:
@@ -218,16 +281,25 @@ def eval_moment_retrieval(submission, ground_truth, verbose=True):
                 print(f"[eval_moment_retrieval] [{name}] no data, skipped")
             continue
 
-        iou_thd2average_precision = compute_mr_ap(_submission, _ground_truth, num_workers=8, chunksize=50)
+        iou_thd2average_precision = compute_mr_ap(
+            _submission, _ground_truth, num_workers=8, chunksize=50
+        )
         iou_thd2recall_at_one = compute_mr_r1(_submission, _ground_truth)
-        ret_metrics[name] = {"MR-mAP": iou_thd2average_precision, "MR-R1": iou_thd2recall_at_one}
+        ret_metrics[name] = {
+            "MR-mAP": iou_thd2average_precision,
+            "MR-R1": iou_thd2recall_at_one,
+        }
         if verbose:
-            print(f"[eval_moment_retrieval] [{name}] {time.time() - start_time:.2f} seconds")
+            print(
+                f"[eval_moment_retrieval] [{name}] {time.time() - start_time:.2f} seconds"
+            )
     return ret_metrics
 
 
 def compute_hl_hit1(qid2preds, qid2gt_scores_binary):
-    qid2max_scored_clip_idx = {k: np.argmax(v["pred_saliency_scores"]) for k, v in qid2preds.items()}
+    qid2max_scored_clip_idx = {
+        k: np.argmax(v["pred_saliency_scores"]) for k, v in qid2preds.items()
+    }
     hit_scores = np.zeros((len(qid2preds), 3))
     qids = list(qid2preds.keys())
     for idx, qid in enumerate(qids):
@@ -253,7 +325,8 @@ def compute_hl_ap(qid2preds, qid2gt_scores_binary, num_workers=8, chunksize=50):
     if num_workers > 1:
         with mp.Pool(num_workers) as pool:
             for idx, w_idx, score in pool.imap_unordered(
-                    compute_ap_from_tuple, input_tuples, chunksize=chunksize):
+                compute_ap_from_tuple, input_tuples, chunksize=chunksize
+            ):
                 ap_scores[idx, w_idx] = score
     else:
         for input_tuple in input_tuples:
@@ -267,10 +340,10 @@ def compute_hl_ap(qid2preds, qid2gt_scores_binary, num_workers=8, chunksize=50):
 def compute_ap_from_tuple(input_tuple):
     idx, w_idx, y_true, y_predict = input_tuple
     if len(y_true) < len(y_predict):
-        y_predict = y_predict[:len(y_true)]
+        y_predict = y_predict[: len(y_true)]
     elif len(y_true) > len(y_predict):
         _y_predict = np.zeros(len(y_true))
-        _y_predict[:len(y_predict)] = y_predict
+        _y_predict[: len(y_predict)] = y_predict
         y_predict = _y_predict
 
     score = get_ap(y_true, y_predict)
@@ -292,16 +365,24 @@ def eval_highlight(submission, ground_truth, verbose=True):
     gt_saliency_score_min_list = [2, 3, 4]
     saliency_score_names = ["Fair", "Good", "VeryGood"]
     highlight_det_metrics = {}
-    for gt_saliency_score_min, score_name in zip(gt_saliency_score_min_list, saliency_score_names):
+    for gt_saliency_score_min, score_name in zip(
+        gt_saliency_score_min_list, saliency_score_names
+    ):
         start_time = time.time()
         qid2gt_scores_binary = {
             k: (v >= gt_saliency_score_min).astype(float)
-            for k, v in qid2gt_scores_full_range.items()}
+            for k, v in qid2gt_scores_full_range.items()
+        }
         hit_at_one = compute_hl_hit1(qid2preds, qid2gt_scores_binary)
         mean_ap = compute_hl_ap(qid2preds, qid2gt_scores_binary)
-        highlight_det_metrics[f"HL-min-{score_name}"] = {"HL-mAP": mean_ap, "HL-Hit1": hit_at_one}
+        highlight_det_metrics[f"HL-min-{score_name}"] = {
+            "HL-mAP": mean_ap,
+            "HL-Hit1": hit_at_one,
+        }
         if verbose:
-            print(f"Calculating highlight scores with min score {gt_saliency_score_min} ({score_name})")
+            print(
+                f"Calculating highlight scores with min score {gt_saliency_score_min} ({score_name})"
+            )
             print(f"Time cost {time.time() - start_time:.2f} seconds")
     return highlight_det_metrics
 
@@ -310,9 +391,10 @@ def eval_submission(submission, ground_truth, verbose=True, match_number=True):
     pred_qids = set([e["qid"] for e in submission])
     gt_qids = set([e["qid"] for e in ground_truth])
     if match_number:
-        assert pred_qids == gt_qids, \
-            f"qids in ground_truth and submission must match. " \
+        assert pred_qids == gt_qids, (
+            f"qids in ground_truth and submission must match. "
             f"use `match_number=False` if you wish to disable this check"
+        )
     else:
         shared_qids = pred_qids.intersection(gt_qids)
         submission = [e for e in submission if e["qid"] in shared_qids]
@@ -322,7 +404,9 @@ def eval_submission(submission, ground_truth, verbose=True, match_number=True):
     eval_metrics_brief = OrderedDict()
 
     if "pred_relevant_windows" in submission[0]:
-        moment_ret_scores = eval_moment_retrieval(submission, ground_truth, verbose=verbose)
+        moment_ret_scores = eval_moment_retrieval(
+            submission, ground_truth, verbose=verbose
+        )
         eval_metrics.update(moment_ret_scores)
 
         # Добавляем краткие метрики для каждого диапазона длительности
@@ -338,25 +422,40 @@ def eval_submission(submission, ground_truth, verbose=True, match_number=True):
     if "pred_saliency_scores" in submission[0]:
         highlight_det_scores = eval_highlight(submission, ground_truth, verbose=verbose)
         eval_metrics.update(highlight_det_scores)
-        highlight_det_scores_brief = dict([
-            (f"{k}-{sub_k.split('-')[1]}", v[sub_k])
-            for k, v in highlight_det_scores.items() for sub_k in v])
-        eval_metrics_brief.update(sorted(highlight_det_scores_brief.items(), key=lambda x: x[0]))
+        highlight_det_scores_brief = dict(
+            [
+                (f"{k}-{sub_k.split('-')[1]}", v[sub_k])
+                for k, v in highlight_det_scores.items()
+                for sub_k in v
+            ]
+        )
+        eval_metrics_brief.update(
+            sorted(highlight_det_scores_brief.items(), key=lambda x: x[0])
+        )
 
     # Сортируем все краткие метрики по ключу
-    eval_metrics_brief = OrderedDict(sorted(eval_metrics_brief.items(), key=lambda x: x[0]))
+    eval_metrics_brief = OrderedDict(
+        sorted(eval_metrics_brief.items(), key=lambda x: x[0])
+    )
 
     # Сортируем полные метрики по ключу
     final_eval_metrics = OrderedDict()
     final_eval_metrics["brief"] = eval_metrics_brief
-    final_eval_metrics.update(sorted([(k, v) for k, v in eval_metrics.items()], key=lambda x: x[0]))
+    final_eval_metrics.update(
+        sorted([(k, v) for k, v in eval_metrics.items()], key=lambda x: x[0])
+    )
     return final_eval_metrics
 
 
 def eval_main():
     import argparse
-    parser = argparse.ArgumentParser(description="Moments and Highlights Evaluation Script")
-    parser.add_argument("--submission_path", type=str, help="path to generated prediction file")
+
+    parser = argparse.ArgumentParser(
+        description="Moments and Highlights Evaluation Script"
+    )
+    parser.add_argument(
+        "--submission_path", type=str, help="path to generated prediction file"
+    )
     parser.add_argument("--gt_path", type=str, help="path to GT file")
     parser.add_argument("--save_path", type=str, help="path to save the results")
     parser.add_argument("--not_verbose", action="store_true")
@@ -373,5 +472,5 @@ def eval_main():
         f.write(json.dumps(results, indent=4))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     eval_main()
