@@ -225,7 +225,8 @@ def compute_mr_results_with_retrieval(
             query_feat_padded = batch_inputs["query_feat"][0][i]
             query_mask = batch_inputs["query_feat"][1][i]
 
-            target_global = batch_inputs["target_global_audio_feat"][i]
+            # target_global = batch_inputs["target_global_audio_proj_feat"][i]
+            target_global = batch_inputs["target_global_query_proj_feat"][i]
             # distractor_globals = batch_inputs["distractor_global_audios_proj_feat"][i]
             distractor_globals = batch_inputs["distractor_global_queries_proj_feat"][i]
             candidate_vids = batch_inputs["candidate_vids"][i]
