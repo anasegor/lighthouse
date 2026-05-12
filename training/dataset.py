@@ -309,23 +309,26 @@ class StartEndDataset(Dataset):
                     raise NotImplementedError
 
         if self.num_distractors > 0:
-            distractor_vids, distractor_embs = self._get_random_distractor_feat(
-                meta["vid"], self.num_distractors
+            distractor_vids, global_audio_proj_feats, global_query_proj_feats = (
+                self._get_random_distractor_feats(meta["vid"], self.num_distractors)
             )
             target_global = (
                 self.global_emb_cache[meta["vid"]]
                 if hasattr(self, "global_emb_cache")
-                else self._get_global_audio_feat_by_vid(meta["vid"])
+                else self._get_global_audio_proj_feat_by_vid(meta["vid"])
             )
             model_inputs["query_proj_feat"] = self._get_query_proj_feat_by_qid(
                 meta["qid"]
             )
             model_inputs["target_global_query_proj_feat"] = (
-                self._get_query_proj_feat_by_vid(meta["vid"])
+                self._get_global_query_proj_feat_by_vid(meta["vid"])
             )
-            model_inputs["target_audio_global_feat"] = torch.from_numpy(target_global)
-            model_inputs["distractor_audios_global_feat"] = [
-                torch.from_numpy(e) for e in distractor_embs
+            model_inputs["target_global_audio_feat"] = torch.from_numpy(target_global)
+            model_inputs["distractor_global_audios_proj_feat"] = [
+                torch.from_numpy(e) for e in global_audio_proj_feats
+            ]
+            model_inputs["distractor_global_queries_proj_feat"] = [
+                torch.from_numpy(e) for e in global_query_proj_feats
             ]
             model_inputs["distractor_vids"] = distractor_vids
             model_inputs["target_vid"] = meta["vid"]
@@ -570,7 +573,7 @@ class StartEndDataset(Dataset):
         )
         return self.embedding(word_inds)
 
-    def _get_global_audio_feat_by_vid(self, vid):
+    def _get_global_audio_proj_feat_by_vid(self, vid):
         feat_dir = self.a_feat_dirs[0]
         feat_path = join(feat_dir, f"{vid}.npz")
         with np.load(feat_path) as data:
@@ -578,29 +581,37 @@ class StartEndDataset(Dataset):
         emb = l2_normalize_np_array(emb)
         return emb
 
-    def _get_random_distractor_feat(self, cur_vid, num):
+    def _get_global_query_proj_feat_by_vid(self, vid):
+        q_feat_path = join(self.q_feat_dir, f"gid{vid}.npz")
+        with np.load(q_feat_path) as data:
+            proj = data[self.q_global_key].astype(np.float32)
+        proj = l2_normalize_np_array(proj)
+        return torch.from_numpy(proj)  # (D_proj,)
+
+    def _get_random_distractor_feats(self, cur_vid, num):
         candidates = [v for v in self.all_vids if v != cur_vid]
         if len(candidates) < num:
             chosen = random.choices(candidates, k=num)
         else:
             chosen = random.sample(candidates, k=num)
-        if hasattr(self, "global_emb_cache"):
-            embs = [self.global_emb_cache[v] for v in chosen]  # numpy
-        else:
-            embs = [self._get_global_audio_feat_by_vid(v) for v in chosen]
-        return chosen, embs
 
-    def _get_query_proj_feat_by_vid(self, vid):
-        q_feat_path = join(self.q_feat_dir, f"qid{vid}.npz")
+        if hasattr(self, "global_emb_cache"):
+            global_audio_feats = [self.global_emb_cache[v] for v in chosen]  # numpy
+        else:
+            global_audio_proj_feats = [
+                self._get_global_audio_proj_feat_by_vid(v) for v in chosen
+            ]
+
+        global_query_proj_feats = [
+            self._get_global_query_proj_feat_by_vid(v) for v in chosen
+        ]
+
+        return chosen, global_audio_proj_feats, global_query_proj_feats
+
+    def _get_query_proj_feat_by_qid(self, qid):
+        q_feat_path = join(self.q_feat_dir, f"qid{qid}.npz")
         with np.load(q_feat_path) as data:
             proj = data[self.q_proj_key].astype(np.float32)
-        proj = l2_normalize_np_array(proj)
-        return torch.from_numpy(proj)  # (D_proj,)
-
-    def _get_global_query_proj_feat_by_qid(self, qid):
-        q_feat_path = join(self.q_feat_dir, f"gid{qid}.npz")
-        with np.load(q_feat_path) as data:
-            proj = data[self.q_global_key].astype(np.float32)
         proj = l2_normalize_np_array(proj)
         return torch.from_numpy(proj)  # (D_proj,)
 
@@ -730,12 +741,16 @@ def start_end_collate(batch):
         elif k == "target_global_query_proj_feat":
             batched_data[k] = torch.stack([e["model_inputs"][k] for e in batch])
 
-        elif k == "distractor_audios_global_feat":
+        elif k == "distractor_global_audios_proj_feat":
             distractors_list = [e["model_inputs"][k] for e in batch]
             batched_data[k] = torch.stack(
                 [torch.stack(lst) for lst in distractors_list]
             )
-
+        elif k == "distractor_global_queries_proj_feat":
+            distractors_list = [e["model_inputs"][k] for e in batch]
+            batched_data[k] = torch.stack(
+                [torch.stack(lst) for lst in distractors_list]
+            )
         elif k in ["distractor_vids", "candidate_vids", "target_vid"]:
             batched_data[k] = [e["model_inputs"][k] for e in batch]
 
@@ -773,9 +788,9 @@ def prepare_batch_inputs(batched_model_inputs, device, non_blocking=False):
             device, non_blocking=non_blocking
         )
 
-    if "target_audio_global_feat" in batched_model_inputs:
-        model_inputs["target_audio_global_feat"] = batched_model_inputs[
-            "target_audio_global_feat"
+    if "target_global_audio_proj_feat" in batched_model_inputs:
+        model_inputs["target_global_audio_proj_feat"] = batched_model_inputs[
+            "target_global_audio_proj_feat"
         ].to(device, non_blocking=non_blocking)
 
     if "target_global_query_proj_feat" in batched_model_inputs:
@@ -783,9 +798,14 @@ def prepare_batch_inputs(batched_model_inputs, device, non_blocking=False):
             "target_global_query_proj_feat"
         ].to(device, non_blocking=non_blocking)
 
-    if "distractor_audios_global_feat" in batched_model_inputs:
-        model_inputs["distractor_audios_global_feat"] = batched_model_inputs[
-            "distractor_audios_global_feat"
+    if "distractor_audios_global_feats" in batched_model_inputs:
+        model_inputs["distractor_audios_global_feats"] = batched_model_inputs[
+            "distractor_audios_global_feats"
+        ].to(device, non_blocking=non_blocking)
+
+    if "distractor_global_queries_proj_feat" in batched_model_inputs:
+        model_inputs["distractor_global_queries_proj_feat"] = batched_model_inputs[
+            "distractor_global_queries_proj_feat"
         ].to(device, non_blocking=non_blocking)
 
     # if (
@@ -801,8 +821,8 @@ def prepare_batch_inputs(batched_model_inputs, device, non_blocking=False):
     #     )  # (batch, 1+N, D)
     #     model_inputs["cand_audio_globals"] = cand_glob
 
-    if "query_global" in batched_model_inputs:
-        model_inputs["text_global"] = batched_model_inputs["query_global"].to(
+    if "query_proj_feat" in batched_model_inputs:
+        model_inputs["query_proj_feat"] = batched_model_inputs["query_proj_feat"].to(
             device, non_blocking=non_blocking
         )
 
