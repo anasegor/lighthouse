@@ -584,7 +584,7 @@ class StartEndDataset(Dataset):
     def _get_global_query_proj_feat_by_vid(self, vid):
         q_feat_path = join(self.q_feat_dir, f"gid{vid}.npz")
         with np.load(q_feat_path) as data:
-            proj = data[self.q_proj_key].astype(np.float32)
+            proj = data[self.q_proj_key].astype(np.float32).squeeze()
         proj = l2_normalize_np_array(proj)
         return proj  # (D_proj,)
 
@@ -732,9 +732,8 @@ def start_end_collate(batch):
             batched_data[k] = torch.stack([e["model_inputs"][k] for e in batch])  # (batch, D)
 
         elif k in ["distractor_global_audios_proj_feat", "distractor_global_queries_proj_feat"]:
-            # каждый элемент batch: список из N тензоров (D,)
             distractors_list = [e["model_inputs"][k] for e in batch]
-            batched_data[k] = torch.stack([torch.stack(lst) for lst in distractors_list])  # (batch, N, D)
+            batched_data[k] = torch.stack([torch.stack(lst) for lst in distractors_list])
             
         elif k in ["distractor_vids", "candidate_vids", "target_vid"]:
             batched_data[k] = [e["model_inputs"][k] for e in batch]

@@ -246,13 +246,11 @@ def compute_mr_results_with_retrieval(
             except ValueError:
                 target_idx = -1
             if target_idx != -1:
-                # сортируем по убыванию cos_scores
-                sorted_indices = (
-                    torch.argsort(cos_scores, descending=True).cpu().tolist()
-                )
-                target_rank = sorted_indices.index(target_idx)  # 0-based
+                target_rank = (
+                    (cos_scores > cos_scores[target_idx]).sum().item()
+                )  # число с большим значением
             else:
-                target_rank = len(candidate_vids)  # не нашли – самый плохой ранг
+                target_rank = len(candidate_vids)
             retrieval_stats.append((meta["qid"], target_rank))
 
             # Логирование (опционально)
