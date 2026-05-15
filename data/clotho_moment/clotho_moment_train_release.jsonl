@@ -2972,8 +2972,6 @@
 {"qid": "02971", "query": "A door slowly creaked open and closed and another continued creaking.", "duration": 60, "vid": "Venice_3457.0_3517.0", "relevant_windows": [[24.5, 51.5]], "fg_dB": 3.0933687619288444}
 {"qid": "02972", "query": "A waterfall splashing down to its base with a roar and the wind howls with it.", "duration": 60, "vid": "Venice_3459.0_3519.0", "relevant_windows": [[20.6, 43.6]], "fg_dB": -3.934675114348309}
 {"qid": "02973", "query": "Synthetic tones that start with static then progress to low humming and finish with rhythmic popping beats", "duration": 60, "vid": "Venice_3460.0_3520.0", "relevant_windows": [[6.8, 22.8]], "fg_dB": -0.511137941492489}
-{"qid": "02974", "query": "Two men are talking and clanking plates while other people talk in the background.", "duration": 60, "vid": "Venice_3461.0_3521.0", "relevant_windows": [[9.9, 24.9]], "fg_dB": -1.427530704745548}
-{"qid": "02975", "query": "Material is rattled around in a container as the lawnmower moves over the grass.", "duration": 60, "vid": "Venice_3461.0_3521.0", "relevant_windows": [[27.2, 47.2]], "fg_dB": 2.0606712382350354}
 {"qid": "02976", "query": "The fire is burning some logs while an engine is whirring in the background", "duration": 60, "vid": "Venice_3462.0_3522.0", "relevant_windows": [[0.1, 26.1]], "fg_dB": -1.3841695154646345}
 {"qid": "02977", "query": "A farm has several oinking hogs in it.", "duration": 60, "vid": "Venice_3463.0_3523.0", "relevant_windows": [[1.6, 18.6]], "fg_dB": -4.7899394694209825}
 {"qid": "02978", "query": "Heavy machinery operates and engines run as people talk in the background.", "duration": 60, "vid": "Venice_3465.0_3525.0", "relevant_windows": [[9.6, 31.6]], "fg_dB": -4.180127170537158}
@@ -8331,8 +8329,6 @@
 {"qid": "08330", "query": "A car driving quickly past a fixed point followed by a second car driving past the same point.", "duration": 60, "vid": "Stockholm_3200.0_3260.0", "relevant_windows": [[9.7, 32.7]], "fg_dB": -3.2272776986388543}
 {"qid": "08331", "query": "Two ladies are talking to each other and then a man makes an announcement.", "duration": 60, "vid": "Stockholm_3201.0_3261.0", "relevant_windows": [[25.6, 45.6]], "fg_dB": 3.9125713427428908}
 {"qid": "08332", "query": "One lonely bird chirps rhythmically while an insect buzzes.", "duration": 60, "vid": "Stockholm_3203.0_3263.0", "relevant_windows": [[2.3, 23.3]], "fg_dB": -0.8017970067171909}
-{"qid": "08333", "query": "A stapler slowly staples paper together on a desk.", "duration": 60, "vid": "Stockholm_3206.0_3266.0", "relevant_windows": [[10.9, 27.9]], "fg_dB": 4.865220779870806}
-{"qid": "08334", "query": "A large industrial engine operating inside a factory.", "duration": 60, "vid": "Stockholm_3206.0_3266.0", "relevant_windows": [[33.8, 56.8]], "fg_dB": 4.006035687795727}
 {"qid": "08335", "query": "The rain came pouring down the side of a highway as cars passed by through the puddles.", "duration": 60, "vid": "Stockholm_3207.0_3267.0", "relevant_windows": [[20.8, 45.8]], "fg_dB": 2.558940228466835}
 {"qid": "08336", "query": "Drawers are being opened and closed and the items inside moved around.", "duration": 60, "vid": "Stockholm_3208.0_3268.0", "relevant_windows": [[11.0, 30.0]], "fg_dB": -0.007916336051740025}
 {"qid": "08337", "query": "A person on some dry ground starts walking then running.", "duration": 60, "vid": "Stockholm_3210.0_3270.0", "relevant_windows": [[41.2, 59.2]], "fg_dB": -4.578165262645822}
@@ -15688,8 +15684,6 @@
 {"qid": "15687", "query": "A large crowd of people are talking outside at a gathering.", "duration": 60, "vid": "Bangkok_7764.0_7824.0", "relevant_windows": [[16.1, 36.1]], "fg_dB": -4.216881650509455}
 {"qid": "15688", "query": "The electric can opener is opening a metal can.", "duration": 60, "vid": "Bangkok_7764.0_7824.0", "relevant_windows": [[37.2, 52.2]], "fg_dB": -2.842001718267422}
 {"qid": "15689", "query": "A bird makes its calling song and repeats this and finally after an interval repeats it again.", "duration": 60, "vid": "Bangkok_7765.0_7825.0", "relevant_windows": [[34.5, 54.5]], "fg_dB": 1.1201578604698614}
-{"qid": "15690", "query": "Several children speak and one of them brings attention to themselves by shouting out.", "duration": 60, "vid": "Bangkok_7766.0_7826.0", "relevant_windows": [[1.5, 27.5]], "fg_dB": 1.5013251829765584}
-{"qid": "15691", "query": "The brakes of a train screech before it slows down, and then travels on.", "duration": 60, "vid": "Bangkok_7766.0_7826.0", "relevant_windows": [[27.5, 44.5]], "fg_dB": 1.2553667215918916}
 {"qid": "15692", "query": "A sports car that is being driven away.", "duration": 60, "vid": "Bangkok_7768.0_7828.0", "relevant_windows": [[8.9, 29.9]], "fg_dB": -0.3016767401245124}
 {"qid": "15693", "query": "On a regular street, cars go by at a medium to high speed.", "duration": 60, "vid": "Bangkok_7768.0_7828.0", "relevant_windows": [[39.9, 57.9]], "fg_dB": 1.6116524537150223}
 {"qid": "15694", "query": "A large group of people are clapping their hands.", "duration": 60, "vid": "Bangkok_7769.0_7829.0", "relevant_windows": [[4.4, 30.4]], "fg_dB": 2.3523634483379228}
@@ -24150,7 +24144,6 @@
 {"qid": "24149", "query": "As someone walks their high heels click and clack across the wooden floor.", "duration": 60, "vid": "Amsterdam_3255.0_3315.0", "relevant_windows": [[16.3, 41.3]], "fg_dB": 4.682429270068916}
 {"qid": "24150", "query": "A record hisses as the needle is moved about on top of it.", "duration": 60, "vid": "Amsterdam_3256.0_3316.0", "relevant_windows": [[0.2, 24.2]], "fg_dB": -1.220601336958163}
 {"qid": "24151", "query": "Someone is loudly chopping away at some wood.", "duration": 60, "vid": "Amsterdam_3257.0_3317.0", "relevant_windows": [[37.8, 58.8]], "fg_dB": 2.0935731645845346}
-{"qid": "24152", "query": "A group of people chant, then set off fireworks.", "duration": 60, "vid": "Amsterdam_3258.0_3318.0", "relevant_windows": [[38.7, 52.7]], "fg_dB": -4.656256751366005}
 {"qid": "24153", "query": "People talking indoors then someone sweeps the floor towards the end.", "duration": 60, "vid": "Amsterdam_3259.0_3319.0", "relevant_windows": [[18.0, 36.0]], "fg_dB": 3.681696104579837}
 {"qid": "24154", "query": "Several birds chirping next to a busy street with cars and trucks driving by.", "duration": 60, "vid": "Amsterdam_3260.0_3320.0", "relevant_windows": [[19.4, 35.4]], "fg_dB": 4.178313468883163}
 {"qid": "24155", "query": "Someone carrying the microphone is walking on gravel.", "duration": 60, "vid": "Amsterdam_3261.0_3321.0", "relevant_windows": [[2.3, 16.3]], "fg_dB": -4.286082204711031}
