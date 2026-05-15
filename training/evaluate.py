@@ -475,7 +475,7 @@ def eval_epoch(
         num_workers=opt.num_workers,
         shuffle=False,
     )
-    if opt.num_distractors > 0:
+    if hasattr(opt, 'num_distractors') and opt.num_distractors > 0:
         submission, retrieval_metrics = compute_mr_results_with_retrieval(
             epoch_i,
             model,

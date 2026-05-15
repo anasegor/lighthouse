@@ -154,9 +154,8 @@ class StartEndDataset(Dataset):
         self.global_audio_key = global_audio_key
         self.q_proj_key = q_proj_key
         self.num_distractors = num_distractors
-        self.length_class_boundaries = [0, 10, 30, 300]
-        self.num_length_classes = len(self.length_class_boundaries) - 1
-        # data
+        # self.length_class_boundaries = [0, 10, 30, 300]
+        # self.num_length_classes = len(self.length_class_boundaries) - 1
         self.data = self.load_data()
         
 
@@ -267,8 +266,9 @@ class StartEndDataset(Dataset):
                 ) = self.get_saliency_labels_all_youtube(meta_label, ctx_l)
 
             else:
-                spans, span_classes = self.get_span_labels(meta["relevant_windows"], ctx_l)
-                model_inputs["span_labels"] = {"spans": spans, "classes": span_classes}
+                # spans, span_classes = self.get_span_labels(meta["relevant_windows"], ctx_l)
+                # model_inputs["span_labels"] = {"spans": spans, "classes": span_classes}
+                model_inputs["span_labels"] = self.get_span_labels(meta["relevant_windows"], ctx_l)
                 model_inputs["pos_mask"] = self.get_pos_mask(
                     meta, ctx_l
                 )  # necessary for TR-DETR. If you dont use it, ignore.
@@ -551,16 +551,16 @@ class StartEndDataset(Dataset):
             random.shuffle(windows)
             windows = windows[: self.max_windows]
 
-        class_indices = []
-        for w in windows:
-            length_sec = w[1] - w[0]
-            # find class index
-            for i in range(self.num_length_classes):
-                if self.length_class_boundaries[i] <= length_sec < self.length_class_boundaries[i+1]:
-                    class_indices.append(i)
-                    break
-            else:
-                class_indices.append(self.num_length_classes - 1)
+        # class_indices = []
+        # for w in windows:
+        #     length_sec = w[1] - w[0]
+        #     # find class index
+        #     for i in range(self.num_length_classes):
+        #         if self.length_class_boundaries[i] <= length_sec < self.length_class_boundaries[i+1]:
+        #             class_indices.append(i)
+        #             break
+        #     else:
+        #         class_indices.append(self.num_length_classes - 1)
 
         if self.span_loss_type == "l1":
             windows = torch.Tensor(windows) / (
@@ -579,7 +579,8 @@ class StartEndDataset(Dataset):
             ).long()  # inclusive
         else:
             raise NotImplementedError
-        return windows, torch.tensor(class_indices, dtype=torch.long)
+        return windows
+        # return windows, torch.tensor(class_indices, dtype=torch.long)
 
     def get_query(self, query):
         word_inds = torch.LongTensor(
@@ -726,9 +727,11 @@ def start_end_collate(batch):
     batched_data = dict()
 
     for k in model_inputs_keys:
+        # if k == "span_labels":
+        #     batched_data[k] = [e["model_inputs"]["span_labels"] for e in batch]
         if k == "span_labels":
-            batched_data[k] = [e["model_inputs"]["span_labels"] for e in batch]
-
+            batched_data[k] = [dict(spans=e["model_inputs"]["span_labels"]) for e in batch]
+            continue
         elif k in ["saliency_pos_labels", "saliency_neg_labels"]:
             batched_data[k] = torch.LongTensor([e["model_inputs"][k] for e in batch])
 
@@ -810,12 +813,17 @@ def prepare_batch_inputs(batched_model_inputs, device, non_blocking=False):
         )
 
     targets = {}
+    # if "span_labels" in batched_model_inputs:
+    #     targets["span_labels"] = [
+    #         {
+    #             "spans": e["spans"].to(device, non_blocking=non_blocking),
+    #             "classes": e["classes"].to(device, non_blocking=non_blocking) if "classes" in e else None
+    #         }
+    #         for e in batched_model_inputs["span_labels"]
+    #     ]
     if "span_labels" in batched_model_inputs:
         targets["span_labels"] = [
-            {
-                "spans": e["spans"].to(device, non_blocking=non_blocking),
-                "classes": e["classes"].to(device, non_blocking=non_blocking) if "classes" in e else None
-            }
+            dict(spans=e["spans"].to(device, non_blocking=non_blocking))
             for e in batched_model_inputs["span_labels"]
         ]
     if "saliency_pos_labels" in batched_model_inputs:

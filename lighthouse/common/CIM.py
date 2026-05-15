@@ -268,7 +268,7 @@ class CIM(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     # for tvsum, add video_length in argument
-    def forward(self, src, mask, query_embed, pos_embed, video_length=None, epoch=None,negative_choose_epoch=100,aud=None):
+    def forward(self, src, mask, query_embed, pos_embed, lad_query=None, video_length=None, epoch=None,negative_choose_epoch=100,aud=None):
         """
         Args:
             src: (batch_size, L, d)
@@ -348,7 +348,10 @@ class CIM(nn.Module):
         memory_global, memory_local = memory[0], memory[1:]
         mask_local = mask[:, 1:]
         pos_embed_local = pos_embed[1:]
-        txt_query = repeat(txt_seq, "b d -> b q d", q=refpoint_embed.shape[0])
+        if lad_query is not None:
+            txt_query = lad_query 
+        else:
+            txt_query = repeat(txt_seq, "b d -> b q d", q=refpoint_embed.shape[0])
 
         tgt = self.processer_for_tgt(memory_local, mask_local, txt_query)
         tgt = rearrange(tgt, "b q d -> q b d")

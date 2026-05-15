@@ -97,9 +97,9 @@ class UVCOM(nn.Module):
         txt_position_embed,
         txt_dim,
         vid_dim,
-        num_queries_per_class = 10,
-        num_length_classes = 3,
         input_dropout,
+        num_queries_per_class=10,
+        num_length_classes=3,
         aux_loss=False,
         max_v_l=75,
         span_loss_type="l1",
@@ -142,9 +142,9 @@ class UVCOM(nn.Module):
         self.use_txt_pos = use_txt_pos
         self.n_input_proj = n_input_proj
         # self.query_embed = nn.Embedding(num_queries, 2)
-        self.class_pattern_embed = nn.Embedding(
-            self.num_length_classes, self.hidden_dim
-        )
+        self.query_coord_embed = nn.Embedding(self.num_queries, 2)
+        self.length_class_embed = nn.Embedding(num_length_classes, hidden_dim)
+        self.query_content_embed = nn.Embedding(self.num_queries, hidden_dim)
         relu_args = [True] * 3
         relu_args[n_input_proj - 1] = False
         self.input_txt_proj = nn.Sequential(
@@ -295,15 +295,19 @@ class UVCOM(nn.Module):
 
         video_length = src_vid.shape[1]
 
-        query_embed = self.class_pattern_embed.unsqueeze(1).repeat(
-            1, self.num_queries_per_class, 1
-        )  # (N_c, N_q, d)
-        query_embed = query_embed.view(-1, self.hidden_dim)  # (N_c*N_q, d)
+        qc = self.length_class_embed.weight.repeat_interleave(self.num_queries_per_class, dim=0) # [Nq, d]
+
+        qq = self.query_content_embed.weight # [Nq, d]
+        query_content = qc + qq # [Nq, d]
+        query_content_b = query_content.unsqueeze(1).repeat(1, src_vid.shape[0], 1).permute(1, 0, 2) # [bsz, Nq, d]
+        query_coord = self.query_coord_embed.weight  # [Nq, 2]
+
         hs, reference, memory, memory_global, sim = self.CIM(
             src,
             ~mask,
-            query_embed,
+            query_coord,
             pos,
+            query_content_b,
             video_length=video_length,
             epoch=epoch,
             negative_choose_epoch=self.negative_choose_epoch,
@@ -354,8 +358,9 @@ class UVCOM(nn.Module):
         _, _, memory_neg, memory_global_neg, _ = self.CIM(
             src_neg,
             ~mask_neg,
-            query_embed,
+            query_coord,
             pos_neg,
+            query_content_b,
             video_length=video_length,
             epoch=epoch,
             negative_choose_epoch=self.negative_choose_epoch,
@@ -385,27 +390,15 @@ class UVCOM(nn.Module):
 
 
 class SetCriterion(nn.Module):
-    """This class computes the loss for DETR.
+    """ This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
 
-    def __init__(
-        self,
-        matcher,
-        weight_dict,
-        eos_coef,
-        losses,
-        span_loss_type,
-        max_v_l,
-        saliency_margin=1,
-        use_matcher=True,
-        num_length_classes=3,
-        num_queries_per_class=10,
-        max_duration=300,
-    ):
-        """Create the criterion.
+    def __init__(self, matcher, weight_dict, eos_coef, losses, span_loss_type, max_v_l,
+                 saliency_margin=1, use_matcher=True):
+        """ Create the criterion.
         Parameters:
             matcher: module able to compute a matching between targets and proposals
             weight_dict: dict containing as key the names of the losses and as values their relative weight.
@@ -423,47 +416,34 @@ class SetCriterion(nn.Module):
         self.max_v_l = max_v_l
         self.saliency_margin = saliency_margin
 
-        self.num_length_classes = num_length_classes
-        self.num_queries_per_class = num_queries_per_class
-        self.max_duration = max_duration
-        self.total_queries = num_length_classes * num_queries_per_class
-
         # foreground and background classification
         self.foreground_label = 0
         self.background_label = 1
         self.eos_coef = eos_coef
         empty_weight = torch.ones(2)
-        empty_weight[-1] = (
-            self.eos_coef
-        )  # lower weight for background (index 1, foreground index 0)
-        self.register_buffer("empty_weight", empty_weight)
-
+        empty_weight[-1] = self.eos_coef  # lower weight for background (index 1, foreground index 0)
+        self.register_buffer('empty_weight', empty_weight)
+        
         # for tvsum,
         self.use_matcher = use_matcher
 
     def loss_spans(self, outputs, targets, indices):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
-        targets dicts must contain the key "spans" containing a tensor of dim [nb_tgt_spans, 2]
-        The target spans are expected in format (center_x, w), normalized by the image size.
+           targets dicts must contain the key "spans" containing a tensor of dim [nb_tgt_spans, 2]
+           The target spans are expected in format (center_x, w), normalized by the image size.
         """
-        assert "pred_spans" in outputs
+        assert 'pred_spans' in outputs
         targets = targets["span_labels"]
         idx = self._get_src_permutation_idx(indices)
-        src_spans = outputs["pred_spans"][idx]  # (#spans, max_v_l * 2)
-        tgt_spans = torch.cat(
-            [t["spans"][i] for t, (_, i) in zip(targets, indices)], dim=0
-        )  # (#spans, 2)
+        src_spans = outputs['pred_spans'][idx]  # (#spans, max_v_l * 2)
+        tgt_spans = torch.cat([t['spans'][i] for t, (_, i) in zip(targets, indices)], dim=0)  # (#spans, 2)
         if self.span_loss_type == "l1":
-            loss_span = F.l1_loss(src_spans, tgt_spans, reduction="none")
-            loss_giou = 1 - torch.diag(
-                generalized_temporal_iou(
-                    span_cxw_to_xx(src_spans), span_cxw_to_xx(tgt_spans)
-                )
-            )
+            loss_span = F.l1_loss(src_spans, tgt_spans, reduction='none')
+            loss_giou = 1 - torch.diag(generalized_temporal_iou(span_cxw_to_xx(src_spans), span_cxw_to_xx(tgt_spans)))
         else:  # ce
             n_spans = src_spans.shape[0]
             src_spans = src_spans.view(n_spans, 2, self.max_v_l).transpose(1, 2)
-            loss_span = F.cross_entropy(src_spans, tgt_spans, reduction="none")
+            loss_span = F.cross_entropy(src_spans, tgt_spans, reduction='none')
 
             # giou
             # src_span_indices = src_spans.max(1)[1]  # (#spans, 2)
@@ -475,8 +455,8 @@ class SetCriterion(nn.Module):
             loss_giou = loss_span.new_zeros([1])
 
         losses = {}
-        losses["loss_span"] = loss_span.mean()
-        losses["loss_giou"] = loss_giou.mean()
+        losses['loss_span'] = loss_span.mean()
+        losses['loss_giou'] = loss_giou.mean()
         return losses
 
     def loss_labels(self, outputs, targets, indices, log=True):
@@ -484,31 +464,20 @@ class SetCriterion(nn.Module):
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         # TODO add foreground and background classifier.  use all non-matched as background.
-        assert "pred_logits" in outputs
-        src_logits = outputs["pred_logits"]  # (batch_size, #queries, #classes=2)
+        assert 'pred_logits' in outputs
+        src_logits = outputs['pred_logits']  # (batch_size, #queries, #classes=2)
         # idx is a tuple of two 1D tensors (batch_idx, src_idx), of the same length == #objects in batch
         idx = self._get_src_permutation_idx(indices)
-        target_classes = torch.full(
-            src_logits.shape[:2],
-            self.background_label,
-            dtype=torch.int64,
-            device=src_logits.device,
-        )  # (batch_size, #queries)
+        target_classes = torch.full(src_logits.shape[:2], self.background_label,
+                                    dtype=torch.int64, device=src_logits.device)  # (batch_size, #queries)
         target_classes[idx] = self.foreground_label
 
-        loss_ce = F.cross_entropy(
-            src_logits.transpose(1, 2),
-            target_classes,
-            self.empty_weight,
-            reduction="none",
-        )
-        losses = {"loss_label": loss_ce.mean()}
+        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight, reduction="none")
+        losses = {'loss_label': loss_ce.mean()}
 
         if log:
             # TODO this should probably be a separate loss, not hacked in this one here
-            losses["class_error"] = (
-                100 - accuracy(src_logits[idx], self.foreground_label)[0]
-            )
+            losses['class_error'] = 100 - accuracy(src_logits[idx], self.foreground_label)[0]
         return losses
 
     def loss_saliency(self, outputs, targets, indices, log=True):
@@ -521,62 +490,45 @@ class SetCriterion(nn.Module):
         # Neg pair loss
         saliency_scores_neg = outputs["saliency_scores_neg"].clone()  # (N, L)
         # loss_neg_pair = torch.sigmoid(saliency_scores_neg).mean()
-
-        loss_neg_pair = (
-            (-torch.log(1.0 - torch.sigmoid(saliency_scores_neg)) * vid_token_mask)
-            .sum(dim=1)
-            .mean()
-        )
+        
+        loss_neg_pair = (- torch.log(1. - torch.sigmoid(saliency_scores_neg)) * vid_token_mask).sum(dim=1).mean()
 
         saliency_scores = outputs["saliency_scores"].clone()  # (N, L)
         saliency_contrast_label = targets["saliency_all_labels"]
 
         saliency_scores = torch.cat([saliency_scores, saliency_scores_neg], dim=1)
-        saliency_contrast_label = torch.cat(
-            [saliency_contrast_label, torch.zeros_like(saliency_contrast_label)], dim=1
-        )
+        saliency_contrast_label = torch.cat([saliency_contrast_label, torch.zeros_like(saliency_contrast_label)], dim=1)
 
         vid_token_mask = vid_token_mask.repeat([1, 2])
-        saliency_scores = (
-            vid_token_mask * saliency_scores + (1.0 - vid_token_mask) * -1e3
-        )
+        saliency_scores = vid_token_mask * saliency_scores + (1. - vid_token_mask) * -1e+3
 
         tau = 0.5
-        loss_rank_contrastive = 0.0
+        loss_rank_contrastive = 0.
 
         # for rand_idx in range(1, 13, 3):
         #     # 1, 4, 7, 10 --> 5 stages
         for rand_idx in range(1, 12):
             drop_mask = ~(saliency_contrast_label > 100)  # no drop
-            pos_mask = (
-                saliency_contrast_label >= rand_idx
-            )  # positive when equal or higher than rand_idx
+            pos_mask = (saliency_contrast_label >= rand_idx)  # positive when equal or higher than rand_idx
 
             if torch.sum(pos_mask) == 0:  # no positive sample
                 continue
             else:
-                batch_drop_mask = (
-                    torch.sum(pos_mask, dim=1) > 0
-                )  # negative sample indicator
+                batch_drop_mask = torch.sum(pos_mask, dim=1) > 0  # negative sample indicator
 
             # drop higher ranks
-            cur_saliency_scores = saliency_scores * drop_mask / tau + ~drop_mask * -1e3
+            cur_saliency_scores = saliency_scores * drop_mask / tau + ~drop_mask * -1e+3
 
             # numerical stability
-            logits = (
-                cur_saliency_scores
-                - torch.max(cur_saliency_scores, dim=1, keepdim=True)[0]
-            )
+            logits = cur_saliency_scores - torch.max(cur_saliency_scores, dim=1, keepdim=True)[0]
 
             # softmax
             exp_logits = torch.exp(logits)
             log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-6)
 
-            mean_log_prob_pos = (pos_mask * log_prob * vid_token_mask).sum(1) / (
-                pos_mask.sum(1) + 1e-6
-            )
+            mean_log_prob_pos = (pos_mask * log_prob * vid_token_mask).sum(1) / (pos_mask.sum(1) + 1e-6)
 
-            loss = -mean_log_prob_pos * batch_drop_mask
+            loss = - mean_log_prob_pos * batch_drop_mask
 
             loss_rank_contrastive = loss_rank_contrastive + loss.mean()
 
@@ -588,15 +540,10 @@ class SetCriterion(nn.Module):
         num_pairs = pos_indices.shape[1]  # typically 2 or 4
         batch_indices = torch.arange(len(saliency_scores)).to(saliency_scores.device)
         pos_scores = torch.stack(
-            [
-                saliency_scores[batch_indices, pos_indices[:, col_idx]]
-                for col_idx in range(num_pairs)
-            ],
-            dim=1,
-        )
+            [saliency_scores[batch_indices, pos_indices[:, col_idx]] for col_idx in range(num_pairs)], dim=1)
         # neg_scores = torch.stack(
-        # [saliency_scores[batch_indices, neg_indices[:, col_idx]] for col_idx in range(num_pairs)], dim=1)
-
+            # [saliency_scores[batch_indices, neg_indices[:, col_idx]] for col_idx in range(num_pairs)], dim=1)
+        
         # for charades_vgg
         neg_scores = []
         for i in batch_indices:
@@ -605,17 +552,14 @@ class SetCriterion(nn.Module):
                 if neg_indices[i, j] == -1:
                     n_score1 = torch.tensor(0).to(pos_scores)
                 else:
-                    n_score1 = saliency_scores[i, neg_indices[i, j]]
+                    n_score1 = saliency_scores[i,neg_indices[i,j]]
                 n_score.append(n_score1)
             neg_scores.append(torch.stack(n_score))
-        neg_scores = torch.stack(neg_scores, dim=0)
+        neg_scores = torch.stack(neg_scores,dim=0)
         # import pdb;pdb.set_trace()
-
-        loss_saliency = (
-            torch.clamp(self.saliency_margin + neg_scores - pos_scores, min=0).sum()
-            / (len(pos_scores) * num_pairs)
-            * 2
-        )  # * 2 to keep the loss the same scale
+                
+        loss_saliency = torch.clamp(self.saliency_margin + neg_scores - pos_scores, min=0).sum() \
+                        / (len(pos_scores) * num_pairs) * 2  # * 2 to keep the loss the same scale
 
         # print(loss_saliency, loss_rank_contrastive)
         # loss_saliency = loss_saliency + loss_rank_contrastive
@@ -625,30 +569,26 @@ class SetCriterion(nn.Module):
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
-        batch_idx = torch.cat(
-            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
-        )
+        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx  # two 1D tensors of the same length
 
     def _get_tgt_permutation_idx(self, indices):
         # permute targets following indices
-        batch_idx = torch.cat(
-            [torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)]
-        )
+        batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
-    def get_sim_loss(self, outputs, targets, indices):
-        sim_inter = outputs["sim"]["VLA_Sim"]
-        sim_clip_intra, mask_clip_intra = outputs["sim"]["CTA_Sim"]
+    def get_sim_loss(self,outputs,targets,indices):
+        sim_inter = outputs['sim']['VLA_Sim']
+        sim_clip_intra, mask_clip_intra = outputs['sim']['CTA_Sim']
 
         # loss_inter
         bs = sim_inter.shape[0]
         gt_inter = torch.eye(bs).to(sim_inter.device)
-        sim_inter_T = sim_inter.transpose(0, 1).log_softmax(dim=-1)
+        sim_inter_T = sim_inter.transpose(0,1).log_softmax(dim=-1)
         sim_inter = sim_inter.log_softmax(dim=-1)
-        loss_inter = gt_inter * sim_inter
+        loss_inter = gt_inter * sim_inter 
         loss_inter_T = gt_inter * sim_inter_T
         # eos_coef_inter = torch.full(loss_inter.shape, 0.1, device=loss_inter.device)
         # eos_coef_inter[torch.arange(bs), torch.arange(bs)] = 1.0
@@ -660,11 +600,11 @@ class SetCriterion(nn.Module):
 
         # loss_clip_intra
         gt_clip_intra = torch.zeros_like(sim_clip_intra).to(sim_clip_intra.device)
-        for idx, data in enumerate(targets["span_labels"]):
+        for idx,data in enumerate(targets['span_labels']):
             clip_total = len(torch.nonzero(mask_clip_intra[idx]))
-            window_id = span_cxw_to_xx(data["spans"]) * clip_total * 2
-            clip_id = (window_id[0][0] / 2, window_id[0][1] / 2)
-            gt_clip_intra[idx, int(clip_id[0]) : int(clip_id[1])] = 1
+            window_id = span_cxw_to_xx(data['spans']) * clip_total * 2
+            clip_id = (window_id[0][0]/2, window_id[0][1]/2)
+            gt_clip_intra[idx,int(clip_id[0]):int(clip_id[1])] = 1
             # for window in window_id:
             #     clip_id = (window[0]/2, window[1]/2)
             # # # import pdb;pdb.set_trace()
@@ -674,7 +614,7 @@ class SetCriterion(nn.Module):
         loss_clip_intra = loss_clip_intra.mean(0).mean()
 
         loss_sim = 0.5 * loss_inter + loss_clip_intra * 0.5
-        loss = {"loss_sim": -loss_sim}
+        loss = {'loss_sim':-loss_sim}
         return loss
 
     def get_loss(self, loss, outputs, targets, indices, **kwargs):
@@ -684,82 +624,58 @@ class SetCriterion(nn.Module):
             "saliency": self.loss_saliency,
             "similarity": self.get_sim_loss,
         }
-        assert loss in loss_map, f"do you really want to compute {loss} loss?"
+        assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, **kwargs)
 
     def forward(self, outputs, targets):
-        batch_size = outputs["pred_spans"].shape[0]
-        device = outputs["pred_spans"].device
+        """ This performs the loss computation.
+        Parameters:
+             outputs: dict of tensors, see the output specification of the model for the format
+             targets: list of dicts, such that len(targets) == batch_size.
+                      The expected keys in each dict depends on the losses applied, see each loss' doc
+        """
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
-        # Список для хранения индексов по каждому батчу
-        per_batch_indices = [[] for _ in range(batch_size)]
+        # Retrieve the matching between the outputs of the last layer and the targets
+        # list(tuples), each tuple is (pred_span_indices, tgt_span_indices)
 
-        for class_idx in range(self.num_length_classes):
-            start = class_idx * self.num_queries_per_class
-            end = (class_idx + 1) * self.num_queries_per_class
-            pred_spans_class = outputs["pred_spans"][:, start:end, :]  # (batch, N_q, 2)
-            pred_logits_class = outputs["pred_logits"][
-                :, start:end, :
-            ]  # (batch, N_q, 2)
+        # only for HL, do not use matcher
+        if self.use_matcher:
+            indices = self.matcher(outputs_without_aux, targets)
+            losses_target = self.losses
+            # indices = None
+            # losses_target = ["saliency",'similarity']
+        else:
+            indices = None
+            losses_target = ["saliency",'similarity']
+            # indices = self.matcher(outputs_without_aux, targets)
+            # losses_target = self.losses
 
-            for b in range(batch_size):
-                # Извлекаем GT для этого батча
-                span_labels = targets[b][
-                    "span_labels"
-                ]  # словарь с ключами 'spans', 'classes'
-                tgt_spans = span_labels["spans"]
-                tgt_classes = span_labels["classes"]
-                mask = tgt_classes == class_idx
-                if mask.sum() == 0:
-                    continue
-                selected_spans = tgt_spans[mask]  # (N_class, 2)
-
-                # Создаём искусственный батч для matcher
-                targets_class = [{"spans": selected_spans}]
-                pred_single = {
-                    "pred_spans": pred_spans_class[b : b + 1],
-                    "pred_logits": pred_logits_class[b : b + 1],
-                }
-                indices_class = self.matcher(pred_single, targets_class)
-                src_idx, tgt_idx = indices_class[0]
-                # Глобальные индексы
-                src_idx_global = src_idx + start
-                per_batch_indices[b].append((src_idx_global, tgt_idx))
-
-        # Объединяем индексы по каждому батчу
-        indices = []
-        for b in range(batch_size):
-            if len(per_batch_indices[b]) == 0:
-                src = torch.empty(0, dtype=torch.long, device=device)
-                tgt = torch.empty(0, dtype=torch.long, device=device)
-            else:
-                src = torch.cat([x[0] for x in per_batch_indices[b]])
-                tgt = torch.cat([x[1] for x in per_batch_indices[b]])
-            indices.append((src, tgt))
-
-        # Вычисляем потери с полученными индексами
+        # Compute all the requested losses
         losses = {}
-        if "spans" in self.losses:
-            losses.update(self.loss_spans(outputs, targets, indices))
-        if "labels" in self.losses:
-            losses.update(self.loss_labels(outputs, targets, indices))
-        if "saliency" in self.losses:
-            losses.update(self.loss_saliency(outputs, targets, indices))
-        if "similarity" in self.losses:
-            losses.update(self.get_sim_loss(outputs, targets, indices))
+        # for loss in self.losses:
+        for loss in losses_target:
+            losses.update(self.get_loss(loss, outputs, targets, indices))
 
-        # Обработка aux_outputs (упрощённо – глобальный matching)
-        if "aux_outputs" in outputs:
-            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        if 'aux_outputs' in outputs:
+            for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                # indices = self.matcher(aux_outputs, targets)
                 if self.use_matcher:
-                    aux_indices = self.matcher(aux_outputs, targets)
+                    indices = self.matcher(aux_outputs, targets)
+                    losses_target = self.losses
                 else:
-                    aux_indices = None
-                for loss in self.losses:
-                    if loss in ["saliency", "similarity"]:
+                    indices = None
+                    losses_target = ["saliency"]    
+                # for loss in self.losses:
+                for loss in losses_target:
+                    if "saliency" == loss:  # skip as it is only in the top layer
                         continue
-                    l_dict = self.get_loss(loss, aux_outputs, targets, aux_indices)
-                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                    if "similarity" == loss:
+                        continue
+                    kwargs = {}
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, **kwargs)
+                    l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
         return losses
 
@@ -816,8 +732,10 @@ def build_model(args):
         txt_dim=args.t_feat_dim,
         vid_dim=args.v_feat_dim,
         aud_dim=args.a_feat_dim if "a_feat_dim" in args else 0,
-        num_queries=args.num_queries,
+        # num_queries=args.num_queries,
         input_dropout=args.input_dropout,
+        num_queries_per_class=args.num_queries_per_class,
+        num_length_classes=args.num_length_classes,
         aux_loss=args.aux_loss,
         span_loss_type=args.span_loss_type,
         n_input_proj=args.n_input_proj,
