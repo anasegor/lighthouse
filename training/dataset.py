@@ -68,6 +68,7 @@ from lighthouse.common.utils.basic_utils import load_jsonl, l2_normalize_np_arra
 from lighthouse.common.utils.tensor_utils import pad_sequences_1d
 from lighthouse.common.utils.span_utils import span_xx_to_cxw
 import torch.nn as nn
+from typing import Dict, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +80,176 @@ def set_seed(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
 set_seed(42)
+
+class AudioMomentMix(nn.Module):
+    def __init__(
+        self,
+        epsilon_cut: float = 5.0,
+        prob: float = 0.7,
+        use_background_mix: bool = True,
+        min_moment_length: int = 1,
+        clip_len: float = 1.0,
+    ):
+        super().__init__()
+        self.epsilon_cut = epsilon_cut
+        self.prob = prob
+        self.use_background_mix = use_background_mix
+        self.min_moment_length = min_moment_length
+        self.clip_len = clip_len
+
+    def forward(
+        self,
+        audio_features: torch.Tensor,  # [T, D]
+        text_features: torch.Tensor,  # [D']
+        moment_start: int,
+        moment_end: int,
+        video_id: str,
+        all_videos_data: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
+        if torch.rand(1).item() > self.prob:
+            return audio_features, text_features, [(moment_start, moment_end)]
+
+        # Stage 1: ForegroundMix
+        audio_fg_mix, fg_ranges = self._foreground_mix(
+            audio_features, moment_start, moment_end
+        )
+
+        # Stage 2: BackgroundMix
+        if (
+            self.use_background_mix
+            and all_videos_data is not None
+            and len(all_videos_data) > 1
+        ):
+            audio_final = self._background_mix(
+                audio_fg_mix, fg_ranges, video_id, all_videos_data
+            )
+            return audio_final, text_features, fg_ranges
+        else:
+            return audio_fg_mix, text_features, fg_ranges
+
+    def _foreground_mix(
+        self, audio_features: torch.Tensor, moment_start: int, moment_end: int
+    ) -> Tuple[torch.Tensor, List[Tuple[int, int]]]:
+        T, D = audio_features.shape
+        fg_length = moment_end - moment_start
+        if fg_length < self.min_moment_length:
+            return audio_features, [(moment_start, moment_end)]
+
+        epsilon_idx = max(1, int(self.epsilon_cut / self.clip_len))
+        n_subsegments = max(1, int(fg_length / epsilon_idx))
+        if n_subsegments <= 1:
+            return audio_features, [(moment_start, moment_end)]
+
+        fg_features = audio_features[moment_start:moment_end]
+        fg_subsegments = list(torch.chunk(fg_features, n_subsegments, dim=0))
+        fg_subsegments = [seg for seg in fg_subsegments if seg.shape[0] > 0]
+        n_fg = len(fg_subsegments)
+
+        bg_before = audio_features[:moment_start]
+        bg_after = audio_features[moment_end:]
+        bg_features = torch.cat([bg_before, bg_after], dim=0)
+        bg_subsegments = list(torch.chunk(bg_features, n_fg + 1, dim=0))
+        bg_subsegments = [seg for seg in bg_subsegments if seg.shape[0] > 0]
+        while len(bg_subsegments) < n_fg + 1:
+            bg_subsegments.append(
+                torch.zeros(
+                    0, D, dtype=audio_features.dtype, device=audio_features.device
+                )
+            )
+        bg_subsegments = bg_subsegments[: n_fg + 1]
+
+        fg_perm = torch.randperm(n_fg)
+        bg_perm = torch.randperm(n_fg + 1)
+        fg_shuffled = [fg_subsegments[i] for i in fg_perm]
+        bg_shuffled = [bg_subsegments[i] for i in bg_perm]
+
+        mixed = [bg_shuffled[0]]
+        for i in range(n_fg):
+            mixed.append(fg_shuffled[i])
+            if i + 1 < len(bg_shuffled):
+                mixed.append(bg_shuffled[i + 1])
+        for j in range(n_fg + 1, len(bg_shuffled)):
+            mixed.append(bg_shuffled[j])
+
+        audio_mixed = torch.cat(mixed, dim=0)
+
+        if audio_mixed.shape[0] < T:
+            deficit = T - audio_mixed.shape[0]
+            if bg_features.shape[0] >= deficit:
+                extra_bg = bg_features[-deficit:]
+            else:
+                repeats = deficit // bg_features.shape[0] + 1
+                extra_bg = bg_features.repeat(repeats, 1)[:deficit]
+            audio_mixed = torch.cat([audio_mixed, extra_bg], dim=0)
+        elif audio_mixed.shape[0] > T:
+            audio_mixed = audio_mixed[:T]
+
+        offset = 0
+        fg_ranges = []
+        for seg in mixed:
+            if any(seg is fg for fg in fg_shuffled):
+                fg_ranges.append((offset, offset + seg.shape[0]))
+            offset += seg.shape[0]
+
+        fg_ranges = [(s, e) for (s, e) in fg_ranges if s < T]
+        fg_ranges = [(min(s, T), min(e, T)) for (s, e) in fg_ranges]
+
+        return audio_mixed, fg_ranges
+
+    def _background_mix(
+        self,
+        audio_features: torch.Tensor,  # [T, D]
+        fg_ranges: List[Tuple[int, int]],
+        video_id: str,
+        all_videos_data: Dict[str, torch.Tensor],  # {vid: tensor}
+    ) -> torch.Tensor:
+
+        T, D = audio_features.shape
+        other_videos = [vid for vid in all_videos_data.keys() if vid != video_id]
+        if not other_videos:
+            return audio_features
+
+        fg_mask = torch.zeros(T, dtype=torch.bool, device=audio_features.device)
+        for s, e in fg_ranges:
+            if s < e:
+                fg_mask[s : min(e, T)] = True
+
+        other_vid = random.choice(other_videos)
+        other_audio = all_videos_data[other_vid]  # [T_other, D]
+        T_other = other_audio.shape[0]
+
+        audio_bgmix = audio_features.clone()
+
+        bg_intervals = []
+        in_bg = False
+        start = 0
+        for i in range(T):
+            if not fg_mask[i] and not in_bg:
+                start = i
+                in_bg = True
+            elif fg_mask[i] and in_bg:
+                bg_intervals.append((start, i))
+                in_bg = False
+        if in_bg:
+            bg_intervals.append((start, T))
+
+        for bg_start, bg_end in bg_intervals:
+            seg_len = bg_end - bg_start
+            if seg_len <= 0:
+                continue
+            if T_other > seg_len:
+                crop_start = torch.randint(0, T_other - seg_len + 1, (1,)).item()
+                cropped = other_audio[crop_start : crop_start + seg_len]
+            else:
+                cropped = other_audio
+                if cropped.shape[0] < seg_len:
+                    # повторяем, чтобы заполнить нужную длину
+                    repeats = seg_len // cropped.shape[0] + 1
+                    cropped = cropped.repeat(repeats, 1)[:seg_len]
+            audio_bgmix[bg_start:bg_end] = cropped.to(audio_bgmix.device)
+
+        return audio_bgmix
 
 
 class StartEndDataset(Dataset):
@@ -117,6 +286,11 @@ class StartEndDataset(Dataset):
         load_labels=True,
         global_audio_key="proj_global_feat",
         num_distractors=0,
+        use_moment_mix=False,
+        moment_mix_epsilon=5.0,
+        moment_mix_prob=0.5,
+        moment_mix_bg=True,
+        moment_mix_min_len=1,
     ):
         self.dset_name = dset_name
         self.domain = domain
@@ -154,11 +328,22 @@ class StartEndDataset(Dataset):
         self.global_audio_key = global_audio_key
         self.q_proj_key = q_proj_key
         self.num_distractors = num_distractors
-        # self.length_class_boundaries = [0, 10, 30, 300]
-        # self.num_length_classes = len(self.length_class_boundaries) - 1
+
+        self.use_moment_mix = use_moment_mix
+        if self.use_moment_mix:
+            self.moment_mix = AudioMomentMix(
+                epsilon_cut=moment_mix_epsilon,
+                prob=moment_mix_prob,
+                use_background_mix=moment_mix_bg,
+                min_moment_length=moment_mix_min_len,
+                clip_len=clip_len,
+            )
+            self._all_audio_cache = None
+        else:
+            self.moment_mix = None
+
         self.data = self.load_data()
         
-
         if self.dset_name == "tvsum" or self.dset_name == "youtube_highlight":
             new_data = []
             for d in self.data:
@@ -186,7 +371,18 @@ class StartEndDataset(Dataset):
     def load_data(self):
         datalist = load_jsonl(self.data_path)
         return datalist
-
+    
+    def _load_all_audio_features(self):
+        if self._all_audio_cache is not None:
+            return self._all_audio_cache
+        cache = {}
+        unique_vids = set(item["vid"] for item in self.data)
+        for vid in unique_vids:
+            a_feat = self._get_audio_feat_by_vid(vid)  # [L, D]
+            cache[vid] = a_feat
+        self._all_audio_cache = cache
+        return cache
+    
     def __len__(self):
         return len(self.data)
 
@@ -214,11 +410,11 @@ class StartEndDataset(Dataset):
             assert (
                 self.a_feat_types is not None
             ), f"use_audio is {self.use_audio}, but a_feat_types is {self.a_feat_types}."
-            model_inputs["audio_feat"] = self._get_audio_feat_by_vid(meta["vid"])
-            ctx_l_a = len(model_inputs["audio_feat"])
+            audio_feat = self._get_audio_feat_by_vid(meta["vid"])
+            ctx_l_a = len(audio_feat)
             # Sometimes, audio features is longer than video features because the length of video is not necessarily 2:30.
             if ctx_l < ctx_l_a:
-                model_inputs["audio_feat"] = model_inputs["audio_feat"][:ctx_l]
+                audio_feat = audio_feat[:ctx_l]
                 ctx_l_a = ctx_l
             elif ctx_l > ctx_l_a:
                 if self.use_video:
@@ -228,6 +424,43 @@ class StartEndDataset(Dataset):
                 ctx_l = ctx_l_a
         else:
             ctx_l_a = self.max_a_l
+
+        if self.use_moment_mix and len(meta.get("relevant_windows", [])) > 0:
+
+            windows = meta["relevant_windows"]
+
+            if len(windows) == 1:
+                chosen_win = windows[0]
+            else:
+                chosen_win = random.choice(windows)
+            st_sec, ed_sec = chosen_win
+            clip_start = int(st_sec / self.clip_len)
+            clip_end = int(ed_sec / self.clip_len)
+            clip_start = max(0, min(clip_start, ctx_l - 1))
+            clip_end = max(clip_start + 1, min(clip_end, ctx_l))  # хотя бы 1
+
+            all_audio = (
+                self._load_all_audio_features()
+                if self.moment_mix.use_background_mix
+                else None
+            )
+
+            audio_feat_mixed, _, fg_ranges = self.moment_mix(
+                audio_feat,
+                model_inputs["query_feat"],
+                clip_start,
+                clip_end,
+                video_id=meta["vid"],
+                all_videos_data=all_audio,
+            )
+            audio_feat = audio_feat_mixed
+
+            new_windows = []
+            for s, e in fg_ranges:
+                new_windows.append([s * self.clip_len, e * self.clip_len])
+            meta["relevant_windows"] = new_windows
+
+        model_inputs["audio_feat"] = audio_feat
 
         if self.use_tef:
             tef_st = torch.arange(0, ctx_l, 1.0) / ctx_l
@@ -550,18 +783,6 @@ class StartEndDataset(Dataset):
         if len(windows) > self.max_windows:
             random.shuffle(windows)
             windows = windows[: self.max_windows]
-
-        # class_indices = []
-        # for w in windows:
-        #     length_sec = w[1] - w[0]
-        #     # find class index
-        #     for i in range(self.num_length_classes):
-        #         if self.length_class_boundaries[i] <= length_sec < self.length_class_boundaries[i+1]:
-        #             class_indices.append(i)
-        #             break
-        #     else:
-        #         class_indices.append(self.num_length_classes - 1)
-
         if self.span_loss_type == "l1":
             windows = torch.Tensor(windows) / (
                 ctx_l * self.clip_len
@@ -580,7 +801,6 @@ class StartEndDataset(Dataset):
         else:
             raise NotImplementedError
         return windows
-        # return windows, torch.tensor(class_indices, dtype=torch.long)
 
     def get_query(self, query):
         word_inds = torch.LongTensor(
@@ -727,14 +947,12 @@ def start_end_collate(batch):
     batched_data = dict()
 
     for k in model_inputs_keys:
-        # if k == "span_labels":
-        #     batched_data[k] = [e["model_inputs"]["span_labels"] for e in batch]
         if k == "span_labels":
             batched_data[k] = [dict(spans=e["model_inputs"]["span_labels"]) for e in batch]
             continue
         elif k in ["saliency_pos_labels", "saliency_neg_labels"]:
             batched_data[k] = torch.LongTensor([e["model_inputs"][k] for e in batch])
-
+            continue
         elif k == "saliency_all_labels":
             pad_data, _ = pad_sequences_1d(
                 [e["model_inputs"][k] for e in batch],
@@ -742,6 +960,7 @@ def start_end_collate(batch):
                 fixed_length=None,
             )
             batched_data[k] = torch.tensor(pad_data, dtype=torch.float32)
+            continue
 
         elif k in ["target_global_audio_proj_feat", "query_proj_feat", "target_global_query_proj_feat"]:
             batched_data[k] = torch.stack([e["model_inputs"][k] for e in batch])  # (batch, D)
@@ -813,14 +1032,6 @@ def prepare_batch_inputs(batched_model_inputs, device, non_blocking=False):
         )
 
     targets = {}
-    # if "span_labels" in batched_model_inputs:
-    #     targets["span_labels"] = [
-    #         {
-    #             "spans": e["spans"].to(device, non_blocking=non_blocking),
-    #             "classes": e["classes"].to(device, non_blocking=non_blocking) if "classes" in e else None
-    #         }
-    #         for e in batched_model_inputs["span_labels"]
-    #     ]
     if "span_labels" in batched_model_inputs:
         targets["span_labels"] = [
             dict(spans=e["spans"].to(device, non_blocking=non_blocking))

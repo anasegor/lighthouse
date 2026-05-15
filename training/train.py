@@ -63,11 +63,7 @@ from cg_detr_dataset import (
     cg_detr_start_end_collate,
     cg_detr_prepare_batch_inputs,
 )
-# from castella_mix_dataset import (
-#     Castella_StartEndDataset,
-#     start_end_collate,
-#     prepare_batch_inputs,
-# )
+
 from evaluate import eval_epoch, start_inference, setup_model
 
 from lighthouse.common.utils.basic_utils import (
@@ -279,7 +275,7 @@ def train(model, criterion, optimizer, lr_scheduler, train_dataset, val_dataset,
                 rename_latest_to_best(latest_file_paths)
 
 
-def main(opt, resume=None, domain=None):
+def main(opt, resume=None, domain=None, moment_mix=None):
     logger.info("Setup config, data and model...")
     set_seed(opt.seed)
 
@@ -306,13 +302,15 @@ def main(opt, resume=None, domain=None):
 
     if opt.model_name == "cg_detr":
         train_dataset = CGDETR_StartEndDataset(**dataset_config)
-    # elif opt.dset_name == "castella":
-    #     train_dataset = Castella_StartEndDataset(**dataset_config,
-    #         use_moment_mix=True,
-    #         moment_mix_epsilon=5.0,
-    #         moment_mix_prob=0.5,
-    #         moment_mix_bg=True,
-    #         moment_mix_min_len=1,)
+    elif moment_mix is True:
+        train_dataset = StartEndDataset(
+            **dataset_config,
+            use_moment_mix=True,
+            moment_mix_epsilon=5.0,
+            moment_mix_prob=0.5,
+            moment_mix_bg=True,
+            moment_mix_min_len=1,
+        )
     else:
         train_dataset = StartEndDataset(**dataset_config)
     copied_eval_config = copy.deepcopy(dataset_config)
@@ -441,6 +439,13 @@ if __name__ == "__main__":
         help="specify model path for fine-tuning. If None, train the model from scratch.",
     )
     parser.add_argument(
+        "--moment_mix",
+        "-mm",
+        action="store_true",
+        default=False,
+        help="train with moment mix data augmentation.",
+    )
+    parser.add_argument(
         "--domain",
         "-dm",
         type=str,
@@ -475,7 +480,7 @@ if __name__ == "__main__":
         option_manager.parse()
         option_manager.clean_and_makedirs()
         opt = option_manager.option
-        main(opt, resume=args.resume, domain=args.domain)
+        main(opt, resume=args.resume, domain=args.domain, moment_mix=args.moment_mix)
     else:
         raise ValueError(
             "The combination of dataset, feature, and domain is invalid: dataset={}, feature={}, domain={}".format(
