@@ -6,10 +6,6 @@ from lighthouse.common.utils.span_utils import generalized_temporal_iou, span_cx
 
 
 class LengthWiseHungarianMatcher(nn.Module):
-    """
-    Length-Aware Matcher.
-    Разбивает queries и targets на группы по длине и делает matching внутри групп.
-    """
 
     def __init__(
         self,
@@ -21,16 +17,10 @@ class LengthWiseHungarianMatcher(nn.Module):
         span_loss_type: str = "l1",
         max_v_l: int = 75,
     ):
-        """
-        Args:
-            num_classes: Количество групп длины (например, 3: short, mid, long)
-            boundaries: Границы длин. Например [0.2, 0.5].
-                        Если None, использует дефолтные.
-        """
+
         super().__init__()
         self.num_classes = num_classes
-        # Границы: < 0.2 -> class 0, < 0.5 -> class 1, >= 0.5 -> class 2
-        self.boundaries = boundaries if boundaries else [10, 30]
+        self.boundaries = boundaries if boundaries else [0.2, 0.5]
 
         self.cost_span = cost_span
         self.cost_giou = cost_giou
@@ -44,69 +34,115 @@ class LengthWiseHungarianMatcher(nn.Module):
 
     @torch.no_grad()
     def forward(self, outputs, targets):
+
         bs, num_queries = outputs["pred_spans"].shape[:2]
+
+        assert num_queries % self.num_classes == 0
+
+        queries_per_class = num_queries // self.num_classes
+
         targets = targets["span_labels"]
-        
-        out_spans = outputs["pred_spans"]          # [bs, Q, 2]
-        out_prob = outputs["pred_logits"].softmax(-1)  # [bs, Q, num_classes+1]?
+
+        out_prob = outputs["pred_logits"].softmax(-1)
+        out_spans = outputs["pred_spans"]
 
         boundaries_tensor = torch.tensor(self.boundaries, device=out_spans.device)
-        
-        # Классы запросов (одинаковы для всех элементов батча)
-        queries_per_class = num_queries // self.num_classes
-        query_classes = torch.arange(num_queries, device=out_spans.device) // queries_per_class  # [Q]
 
         indices = []
-        for i in range(bs):
-            tgt_spans_i = targets[i]["spans"]      # [n_tgt, 2]
-            n_tgt = len(tgt_spans_i)
-            
-            # Матрица стоимости [Q, n_tgt + 1] (последний столбец – dummy)
-            C_i = torch.full((num_queries, n_tgt + 1), float("inf"), device=out_spans.device)
-            
-            if n_tgt > 0:
-                tgt_lengths_i = tgt_spans_i[:, 1]
-                tgt_classes_i = torch.bucketize(tgt_lengths_i, boundaries_tensor)
-                tgt_ids_i = torch.full((n_tgt,), self.foreground_label, device=out_spans.device)
-                
-                pred_spans_i = out_spans[i]  # [Q, 2]
-                prob_i = out_prob[i]         # [Q, num_classes]
-                
-                for k in range(self.num_classes):
-                    q_mask = query_classes == k
-                    t_mask = tgt_classes_i == k
-                    q_idx_k = torch.where(q_mask)[0]
-                    t_idx_k = torch.where(t_mask)[0]
-                    if len(t_idx_k) == 0:
-                        continue
-                    preds_k = pred_spans_i[q_idx_k]
-                    tgts_k = tgt_spans_i[t_idx_k]
-                    prob_k = prob_i[q_idx_k]
-                    cost_class = -prob_k[:, tgt_ids_i[t_idx_k]]
-                    cost_span = torch.cdist(preds_k, tgts_k, p=1)
-                    cost_giou = -generalized_temporal_iou(
-                        span_cxw_to_xx(preds_k), span_cxw_to_xx(tgts_k)
+
+        for b in range(bs):
+
+            pred_prob_b = out_prob[b]
+            pred_spans_b = out_spans[b]
+
+            tgt_spans = targets[b]["spans"]
+
+            if len(tgt_spans) == 0:
+
+                indices.append(
+                    (
+                        torch.empty(0, dtype=torch.int64),
+                        torch.empty(0, dtype=torch.int64),
                     )
-                    C_k = (self.cost_span * cost_span +
-                        self.cost_giou * cost_giou +
-                        self.cost_class * cost_class)
-                    C_i[q_idx_k[:, None], t_idx_k] = C_k
-            
-            # Стоимость для dummy-цели
-            if out_prob.shape[-1] > self.foreground_label + 1:
-                # предполагаем, что последний класс – «нет объекта»
-                cost_no_match = -out_prob[i, :, -1]   # [Q]
+                )
+
+                continue
+
+            tgt_lengths = tgt_spans[:, 1]
+
+            tgt_classes = torch.bucketize(tgt_lengths, boundaries_tensor)
+
+            batch_src_idx = []
+            batch_tgt_idx = []
+
+            for k in range(self.num_classes):
+
+                # -----------------------------
+                # query group
+                # -----------------------------
+                q_start = k * queries_per_class
+                q_end = (k + 1) * queries_per_class
+
+                pred_spans_k = pred_spans_b[q_start:q_end]
+                pred_prob_k = pred_prob_b[q_start:q_end]
+
+                # -----------------------------
+                # gt group
+                # -----------------------------
+                tgt_mask = tgt_classes == k
+
+                if tgt_mask.sum() == 0:
+                    continue
+
+                tgt_spans_k = tgt_spans[tgt_mask]
+
+                tgt_idx_global = torch.where(tgt_mask)[0]
+
+                # -----------------------------
+                # costs
+                # -----------------------------
+                cost_class = -pred_prob_k[:, self.foreground_label].unsqueeze(1)
+
+                cost_span = torch.cdist(pred_spans_k, tgt_spans_k, p=1)
+
+                cost_giou = -generalized_temporal_iou(
+                    span_cxw_to_xx(pred_spans_k), span_cxw_to_xx(tgt_spans_k)
+                )
+
+                C = (
+                    self.cost_class * cost_class
+                    + self.cost_span * cost_span
+                    + self.cost_giou * cost_giou
+                )
+
+                C = C.cpu()
+
+                src_idx, tgt_idx_local = linear_sum_assignment(C)
+
+                src_idx = torch.as_tensor(src_idx, dtype=torch.int64)
+
+                tgt_idx_local = torch.as_tensor(tgt_idx_local, dtype=torch.int64)
+
+                src_idx += q_start
+
+                tgt_idx = tgt_idx_global[tgt_idx_local]
+
+                batch_src_idx.append(src_idx)
+                batch_tgt_idx.append(tgt_idx)
+
+            if len(batch_src_idx) == 0:
+
+                batch_src_idx = torch.empty(0, dtype=torch.int64)
+
+                batch_tgt_idx = torch.empty(0, dtype=torch.int64)
+
             else:
-                cost_no_match = torch.full((num_queries,), 10.0, device=out_spans.device)
-            C_i[:, n_tgt] = cost_no_match
-            
-            # Венгерский алгоритм
-            row, col = linear_sum_assignment(C_i.cpu())
-            row = torch.as_tensor(row, dtype=torch.int64)
-            col = torch.as_tensor(col, dtype=torch.int64)
-            mask = col != n_tgt            # отбрасываем dummy-назначения
-            indices.append((row[mask], col[mask]))
-        
+
+                batch_src_idx = torch.cat(batch_src_idx)
+                batch_tgt_idx = torch.cat(batch_tgt_idx)
+
+            indices.append((batch_src_idx, batch_tgt_idx))
+
         return indices
 
 
