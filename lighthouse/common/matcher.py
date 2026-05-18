@@ -20,7 +20,7 @@ class LengthWiseHungarianMatcher(nn.Module):
 
         super().__init__()
         self.num_classes = num_classes
-        self.boundaries = boundaries if boundaries else [0.2, 0.5]
+        self.boundaries = boundaries if boundaries else [0.05, 0.2]
 
         self.cost_span = cost_span
         self.cost_giou = cost_giou
