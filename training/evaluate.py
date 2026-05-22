@@ -58,7 +58,7 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 
-from training.dataset import StartEndDataset, start_end_collate, prepare_batch_inputs
+from dataset import StartEndDataset, start_end_collate, prepare_batch_inputs
 from training.cg_detr_dataset import (
     CGDETR_StartEndDataset,
     cg_detr_start_end_collate,
@@ -201,15 +201,13 @@ def compute_hl_results(epoch_i, model, eval_loader, opt, criterion=None):
 
 
 @torch.no_grad()
-def compute_mr_results_with_retrieval(
-    epoch_i, model, eval_loader, opt, criterion=None, alpha=0.5, top_k=3
-):
+def compute_mr_results_with_retrieval(epoch_i, model, eval_loader, opt, criterion=None):
     model.eval()
     if criterion is not None:
         criterion.eval()
 
     mr_res = []
-    retrieval_stats = []  # для хранения (qid, rank) для каждого примера
+    retrieval_stats = []
 
     for batch in tqdm(eval_loader, desc="Retrieval + Localization"):
         query_meta = batch[0]
@@ -225,10 +223,10 @@ def compute_mr_results_with_retrieval(
             query_feat_padded = batch_inputs["query_feat"][0][i]
             query_mask = batch_inputs["query_feat"][1][i]
 
-            # target_global = batch_inputs["target_global_audio_proj_feat"][i]
-            target_global = batch_inputs["target_global_query_proj_feat"][i]
-            # distractor_globals = batch_inputs["distractor_global_audios_proj_feat"][i]
-            distractor_globals = batch_inputs["distractor_global_queries_proj_feat"][i]
+            target_global = batch_inputs["target_global_audio_proj_feat"][i]
+            # target_global = batch_inputs["target_global_query_proj_feat"][i]
+            distractor_globals = batch_inputs["distractor_global_audios_proj_feat"][i]
+            # distractor_globals = batch_inputs["distractor_global_queries_proj_feat"][i]
             candidate_vids = batch_inputs["candidate_vids"][i]
 
             all_globals = torch.cat(
@@ -237,12 +235,9 @@ def compute_mr_results_with_retrieval(
             all_globals = F.normalize(all_globals, dim=1)
             cos_scores = torch.matmul(all_globals, text_emb)  # (1+N,)
 
-            # ---- Ранжирование для метрик retrieval ----
             target_vid = meta["vid"]
             try:
-                target_idx = candidate_vids.index(
-                    target_vid
-                )  # индекс в списке кандидатов
+                target_idx = candidate_vids.index(target_vid)
             except ValueError:
                 target_idx = -1
             if target_idx != -1:
@@ -253,20 +248,19 @@ def compute_mr_results_with_retrieval(
                 target_rank = len(candidate_vids)
             retrieval_stats.append((meta["qid"], target_rank))
 
-            # Логирование (опционально)
-            print(f"Query: {meta['qid']} - {meta['query'][:50]}...")
-            print(f"Target vid: {target_vid}")
-            print("\nAll candidates (vid, cos_score):")
-            for idx, vid in enumerate(candidate_vids):
-                print(f"  {idx}: {vid} -> {cos_scores[idx].item():.4f}")
+            # print(f"Query: {meta['qid']} - {meta['query'][:50]}...")
+            # print(f"Target vid: {target_vid}")
+            # print("\nAll candidates (vid, cos_score):")
+            # for idx, vid in enumerate(candidate_vids):
+            #     print(f"  {idx}: {vid} -> {cos_scores[idx].item():.4f}")
 
             topk_vals, topk_idx = torch.topk(
-                cos_scores, min(top_k, len(candidate_vids))
+                cos_scores, min(opt.top_k, len(candidate_vids))
             )
             topk_idx = topk_idx.cpu().tolist()
-            print(f"\nTop-{top_k} candidates by cosine:")
-            for rank, (idx, score) in enumerate(zip(topk_idx, topk_vals)):
-                print(f"  {rank+1}: {candidate_vids[idx]} (cos={score.item():.4f})")
+            # print(f"\nTop-{opt.top_k} candidates by cosine:")
+            # for rank, (idx, score) in enumerate(zip(topk_idx, topk_vals)):
+            #     print(f"  {rank+1}: {candidate_vids[idx]} (cos={score.item():.4f})")
 
             best_combined = -float("inf")
             best_pred = None
@@ -274,9 +268,9 @@ def compute_mr_results_with_retrieval(
 
             for k_idx in topk_idx:
                 cand_vid = candidate_vids[k_idx]
-                print(
-                    f"\n--- Evaluating candidate: {cand_vid} (cos={cos_scores[k_idx].item():.4f})"
-                )
+                # print(
+                #     f"\n--- Evaluating candidate: {cand_vid} (cos={cos_scores[k_idx].item():.4f})"
+                # )
                 temp_feat = eval_loader.dataset._get_audio_feat_by_vid(cand_vid)
                 ctx_l = len(temp_feat)
 
@@ -310,10 +304,10 @@ def compute_mr_results_with_retrieval(
                 prob = F.softmax(outputs["pred_logits"], -1)
                 loc_score = prob[..., 0].max().item()
                 cos_val = cos_scores[k_idx].item()
-                combined = alpha * cos_val + (1 - alpha) * loc_score
-                print(
-                    f"    loc_score={loc_score:.4f}, combined={combined:.4f} (alpha={alpha})"
-                )
+                combined = opt.alpha * cos_val + (1 - opt.alpha) * loc_score
+                # print(
+                #     f"    loc_score={loc_score:.4f}, combined={combined:.4f} (alpha={opt.alpha})"
+                # )
 
                 if combined > best_combined:
                     best_combined = combined
@@ -335,7 +329,7 @@ def compute_mr_results_with_retrieval(
                         vid=cand_vid,
                         pred_relevant_windows=cur_ranked_preds,
                     )
-            print(f"\n>>> BEST: {best_pred['vid']} (combined={best_combined:.4f})")
+            # print(f"\n>>> BEST: {best_pred['vid']} (combined={best_combined:.4f})")
             if best_pred is not None:
                 mr_res.append(best_pred)
             else:
@@ -348,20 +342,18 @@ def compute_mr_results_with_retrieval(
                     )
                 )
 
-    # ----- Вычисление метрик ранжирования -----
     retrieval_metrics = {}
     if retrieval_stats:
         print({"Retrieval Stats (qid, rank)": retrieval_stats})
         ranks = [rank for _, rank in retrieval_stats]
         total = len(ranks)
-        for k in [1, 5, 10]:
+        for k in [1, 5, opt.top_k]:
             recall_k = sum(1 for r in ranks if r < k) / total
             retrieval_metrics[f"Retrieval_Recall@{k}"] = float(f"{recall_k * 100:.2f}")
         # Mean Reciprocal Rank
         mrr = sum(1.0 / (r + 1) for r in ranks) / total
         retrieval_metrics["Retrieval_MRR"] = float(f"{mrr * 100:.2f}")
 
-    # Постпроцессинг моментов
     post_processor = PostProcessorDETR(
         clip_length=opt.clip_length,
         min_ts_val=0,
@@ -475,15 +467,9 @@ def eval_epoch(
         num_workers=opt.num_workers,
         shuffle=False,
     )
-    if hasattr(opt, 'num_distractors') and opt.num_distractors > 0:
+    if hasattr(opt, "num_distractors") and opt.num_distractors > 0:
         submission, retrieval_metrics = compute_mr_results_with_retrieval(
-            epoch_i,
-            model,
-            eval_loader,
-            opt,
-            criterion,
-            alpha=0.9,
-            top_k=3,
+            epoch_i, model, eval_loader, opt, criterion
         )
         metrics, latest_file_paths = eval_epoch_post_processing(
             submission, opt, eval_dataset.data, save_submission_filename
@@ -732,6 +718,18 @@ if __name__ == "__main__":
         default=0,
         help="number of distractor audios for retrieval",
     )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.1,
+        help="number of distractor audios for retrieval",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=3,
+        help="number of distractor audios for retrieval",
+    )
 
     args = parser.parse_args()
     is_valid = check_valid_combination(args.dataset, args.feature, args.domain)
@@ -749,6 +747,8 @@ if __name__ == "__main__":
         opt.eval_split_name = args.split
         opt.eval_path = args.eval_path
         opt.num_distractors = args.num_distractors
+        opt.alpha = args.alpha
+        opt.top_k = args.top_k
         start_inference(opt, domain=args.domain)
 
     else:
