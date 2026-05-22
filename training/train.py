@@ -306,7 +306,7 @@ def main(opt, resume=None, domain=None, moment_mix=None):
         train_dataset = StartEndDataset(
             **dataset_config,
             use_moment_mix=True,
-            moment_mix_epsilon=5.0,
+            moment_mix_epsilon=10.0,
             moment_mix_prob=0.5,
             moment_mix_bg=True,
             moment_mix_min_len=1,
