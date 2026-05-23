@@ -68,6 +68,7 @@ from lighthouse.common.utils.basic_utils import load_jsonl, l2_normalize_np_arra
 from lighthouse.common.utils.tensor_utils import pad_sequences_1d
 from lighthouse.common.utils.span_utils import span_xx_to_cxw
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ def set_seed(seed: int):
 set_seed(42)
 
 
-class AudioMomentMix(nn.Module):
+class MomentMix(nn.Module):
     def __init__(
         self,
         epsilon_cut: float = 5.0,
@@ -92,6 +93,7 @@ class AudioMomentMix(nn.Module):
         use_background_mix: bool = True,
         min_moment_length: int = 1,
         clip_len: float = 1.0,
+        num_bg_candidates: int = 10,
     ):
         super().__init__()
         self.epsilon_cut = epsilon_cut
@@ -99,6 +101,7 @@ class AudioMomentMix(nn.Module):
         self.use_background_mix = use_background_mix
         self.min_moment_length = min_moment_length
         self.clip_len = clip_len
+        self.num_bg_candidates = num_bg_candidates
 
     def forward(
         self,
@@ -113,6 +116,7 @@ class AudioMomentMix(nn.Module):
             return audio_features, text_features, fg_intervals
 
         T, D = audio_features.shape
+        orig_audio = audio_features.clone()
 
         audio_mixed, new_fg_intervals = self._foreground_mix(
             audio_features, fg_intervals
@@ -124,7 +128,11 @@ class AudioMomentMix(nn.Module):
             and len(all_videos_data) > 1
         ):
             audio_mixed = self._background_mix(
-                audio_mixed, new_fg_intervals, video_id, all_videos_data
+                audio_mixed,
+                new_fg_intervals,
+                video_id,
+                all_videos_data,
+                orig_audio=orig_audio,
             )
         return audio_mixed, text_features, new_fg_intervals
 
@@ -204,16 +212,40 @@ class AudioMomentMix(nn.Module):
 
         return audio_mixed, new_fg_intervals
 
-    def _background_mix(self, audio_features, fg_ranges, video_id, all_videos_data):
+    def _background_mix(
+        self, audio_features, fg_ranges, video_id, all_videos_data, orig_audio=None
+    ):
         T, D = audio_features.shape
         other_videos = [vid for vid in all_videos_data.keys() if vid != video_id]
         if not other_videos:
             return audio_features
 
-        other_vid = random.choice(other_videos)
-        other_audio = all_videos_data[other_vid]
-        T_other = other_audio.shape[0]
+        if orig_audio is None:
+            orig_audio = audio_features  # fallback
+        orig_global = F.normalize(orig_audio.mean(dim=0), dim=0)  # [D]
 
+        n_candidates = min(self.num_bg_candidates, len(other_videos))
+        candidate_vids = random.sample(other_videos, n_candidates)
+
+        best_sim = -1.0
+        best_vid = None
+        for cand_vid in candidate_vids:
+            cand_audio = all_videos_data[cand_vid]  # [T_cand, D]
+            cand_global = F.normalize(cand_audio.mean(dim=0), dim=0)
+            sim = torch.dot(orig_global, cand_global).item()
+            if sim > best_sim:
+                best_sim = sim
+                best_vid = cand_vid
+
+        # Если ничего не выбрали (маловероятно), берём случайное
+        if best_vid is None:
+            best_vid = random.choice(other_videos)
+
+        other_audio = all_videos_data[best_vid]
+        T_other = other_audio.shape[0]
+        # --- конец выбора фона ---
+
+        # Далее оригинальный код background mix (без изменений)
         fg_mask = torch.zeros(T, dtype=torch.bool, device=audio_features.device)
         for s, e in fg_ranges:
             if s < e:
@@ -330,7 +362,7 @@ class StartEndDataset(Dataset):
 
         self.use_moment_mix = use_moment_mix
         if self.use_moment_mix:
-            self.moment_mix = AudioMomentMix(
+            self.moment_mix = MomentMix(
                 epsilon_cut=moment_mix_epsilon,
                 prob=moment_mix_prob,
                 use_background_mix=moment_mix_bg,
