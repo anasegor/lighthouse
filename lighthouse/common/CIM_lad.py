@@ -1195,6 +1195,7 @@ def build_CIM(args):
         dim_feedforward=args.dim_feedforward,
         num_encoder_layers=args.enc_layers,
         num_decoder_layers=args.dec_layers,
+        num_queries=args.num_queries_per_class * args.num_length_classes,
         normalize_before=False,
         return_intermediate_dec=True,
         activation='prelu',

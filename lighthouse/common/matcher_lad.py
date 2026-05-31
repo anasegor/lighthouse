@@ -10,7 +10,7 @@ class LengthWiseHungarianMatcher(nn.Module):
     def __init__(
         self,
         num_classes=3,
-        boundaries=None,
+        boundaries=[0.05, 0.2],
         cost_span: float = 1,
         cost_giou: float = 1,
         cost_class: float = 1,
@@ -20,8 +20,7 @@ class LengthWiseHungarianMatcher(nn.Module):
 
         super().__init__()
         self.num_classes = num_classes
-        self.boundaries = boundaries if boundaries else [0.05, 0.2]
-
+        self.boundaries = boundaries
         self.cost_span = cost_span
         self.cost_giou = cost_giou
         self.cost_class = cost_class
@@ -76,19 +75,12 @@ class LengthWiseHungarianMatcher(nn.Module):
             batch_tgt_idx = []
 
             for k in range(self.num_classes):
-
-                # -----------------------------
-                # query group
-                # -----------------------------
                 q_start = k * queries_per_class
                 q_end = (k + 1) * queries_per_class
 
                 pred_spans_k = pred_spans_b[q_start:q_end]
                 pred_prob_k = pred_prob_b[q_start:q_end]
 
-                # -----------------------------
-                # gt group
-                # -----------------------------
                 tgt_mask = tgt_classes == k
 
                 if tgt_mask.sum() == 0:
@@ -98,9 +90,6 @@ class LengthWiseHungarianMatcher(nn.Module):
 
                 tgt_idx_global = torch.where(tgt_mask)[0]
 
-                # -----------------------------
-                # costs
-                # -----------------------------
                 cost_class = -pred_prob_k[:, self.foreground_label].unsqueeze(1)
 
                 cost_span = torch.cdist(pred_spans_k, tgt_spans_k, p=1)
@@ -147,14 +136,9 @@ class LengthWiseHungarianMatcher(nn.Module):
 
 
 def build_matcher(args):
-    # Передаем num_classes и boundaries из args, если они есть, или дефолтные
-    num_classes = getattr(args, "lad_num_classes", 4)
-    # Если границы не заданы в args, можно передать None (возьмет [0.2, 0.5])
-    boundaries = getattr(args, "lad_boundaries", None)
-
     return LengthWiseHungarianMatcher(
-        num_classes=num_classes,
-        boundaries=boundaries,
+        num_classes=args.num_length_classes,
+        boundaries=args.boundaries,
         cost_span=args.set_cost_span,
         cost_giou=args.set_cost_giou,
         cost_class=args.set_cost_class,
@@ -164,14 +148,9 @@ def build_matcher(args):
 
 
 def build_event_matcher(args):
-    # Передаем num_classes и boundaries из args, если они есть, или дефолтные
-    num_classes = getattr(args, "lad_num_classes", 4)
-    # Если границы не заданы в args, можно передать None (возьмет [0.2, 0.5])
-    boundaries = getattr(args, "lad_boundaries", None)
-
     return LengthWiseHungarianMatcher(
-        num_classes=num_classes,
-        boundaries=boundaries,
+        num_classes=args.num_length_classes,
+        boundaries=args.boundaries,
         cost_span=args.set_cost_span,
         cost_giou=args.set_cost_giou,
         span_loss_type=args.span_loss_type,

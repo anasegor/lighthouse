@@ -72,10 +72,8 @@ def compute_mr_ap(
 ):
     iou_thds = [float(f"{e:.2f}") for e in iou_thds]
 
-    # Словарь target_vid для каждого qid
     qid2target_vid = {d["qid"]: d["vid"] for d in ground_truth}
 
-    # Построение предсказаний: только с правильным vid
     pred_qid2data = defaultdict(list)
     for d in submission:
         qid = d["qid"]
@@ -91,7 +89,6 @@ def compute_mr_ap(
                 {"video-id": qid, "t-start": w[0], "t-end": w[1], "score": w[2]}
             )
 
-    # Ground truth для всех qid
     gt_qid2data = defaultdict(list)
     for d in ground_truth:
         gt_windows = (
@@ -103,7 +100,6 @@ def compute_mr_ap(
         for w in gt_windows:
             gt_qid2data[qid].append({"video-id": qid, "t-start": w[0], "t-end": w[1]})
 
-    # Собираем все qid из ground_truth
     all_qids = set(gt_qid2data.keys())
     qid2ap_list = {}
 
@@ -113,13 +109,11 @@ def compute_mr_ap(
         compute_average_precision_detection_wrapper, tiou_thresholds=iou_thds
     )
 
-    # Для каждого qid: если есть предсказания с правильным vid, считаем AP, иначе AP = 0
     data_triples = []
     for qid in all_qids:
         if qid in pred_qid2data and len(pred_qid2data[qid]) > 0:
             data_triples.append([qid, gt_qid2data[qid], pred_qid2data[qid]])
         else:
-            # Предсказания нет или vid не совпадает – AP = 0
             qid2ap_list[qid] = np.zeros(len(iou_thds))
 
     if data_triples:
@@ -134,8 +128,7 @@ def compute_mr_ap(
                 qid, scores = compute_ap_from_triple(data_triple)
                 qid2ap_list[qid] = scores
 
-    # Усредняем по всем qid (включая те, для которых AP=0)
-    ap_array = np.array(list(qid2ap_list.values()))  # (N_qids, len(iou_thds))
+    ap_array = np.array(list(qid2ap_list.values()))
     ap_thds = ap_array.mean(0)
     iou_thd2ap = dict(zip([str(e) for e in iou_thds], ap_thds))
     iou_thd2ap["average"] = np.mean(ap_thds)
@@ -147,16 +140,13 @@ def compute_mr_r1(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10))
     iou_thds = [float(f"{e:.2f}") for e in iou_thds]
     qid2target_vid = {d["qid"]: d["vid"] for d in ground_truth}
 
-    # Берём только предсказания с правильным vid (первое предсказание)
     qid2pred_window = {}
     for d in submission:
         qid = d["qid"]
         if d.get("vid") != qid2target_vid.get(qid, None):
             continue
-        # Берём топ-1 предсказание (первый элемент в pred_relevant_windows)
         qid2pred_window[qid] = d["pred_relevant_windows"][0][:2]
 
-    # Ground truth окна (выбираем GT с максимальным IoU с предсказанием, если предсказание есть, иначе берём первое)
     qid2gt_window = {}
     for d in ground_truth:
         qid = d["qid"]
@@ -172,12 +162,9 @@ def compute_mr_r1(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10))
             best_idx = np.argmax(ious)
             qid2gt_window[qid] = cur_gt_windows[best_idx]
         else:
-            # Нет предсказания с правильным vid – берём первое GT (всё равно IoU=0)
             qid2gt_window[qid] = cur_gt_windows[0]
 
-    # Все qid из ground_truth
     all_qids = set(qid2gt_window.keys())
-    # Для каждого qid: если есть предсказание с правильным vid, вычисляем IoU, иначе IoU = 0
     gt_windows_list = []
     pred_windows_list = []
     for qid in all_qids:
@@ -185,8 +172,7 @@ def compute_mr_r1(submission, ground_truth, iou_thds=np.linspace(0.5, 0.95, 10))
         if qid in qid2pred_window:
             pred_windows_list.append(qid2pred_window[qid])
         else:
-            pred_windows_list.append([0.0, 0.0])  # фиктивное предсказание (0,0) – IoU=0
-
+            pred_windows_list.append([0.0, 0.0])
     pred_windows = np.array(pred_windows_list).astype(float)
     gt_windows = np.array(gt_windows_list).astype(float)
     pred_gt_iou = compute_temporal_iou_batch_paired(pred_windows, gt_windows)
@@ -229,9 +215,8 @@ def get_data_by_range(submission, ground_truth, len_range):
 
 
 def eval_moment_retrieval(submission, ground_truth, verbose=True):
-    # Определяем диапазоны длительности (в секундах)
     length_ranges = [
-        [0, 1500],  # full
+        [0, 1500],
         [0, 10],
         [10, 20],
         [20, 30],
@@ -258,7 +243,7 @@ def eval_moment_retrieval(submission, ground_truth, verbose=True):
     ]
 
     ret_metrics = {}
-    iou_thds = np.linspace(0.5, 0.95, 10)  # для заполнения нулями
+    iou_thds = np.linspace(0.5, 0.95, 10)
 
     for l_range, name in zip(length_ranges, range_names):
         if verbose:
@@ -271,7 +256,6 @@ def eval_moment_retrieval(submission, ground_truth, verbose=True):
             f"{100*len(_ground_truth)/len(ground_truth):.2f} examples."
         )
 
-        # Если после фильтрации не осталось данных, заполняем нулями
         if len(_ground_truth) == 0:
             iou_thd2ap = {str(thd): 0.0 for thd in iou_thds}
             iou_thd2ap["average"] = 0.0
