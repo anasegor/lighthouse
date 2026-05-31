@@ -310,6 +310,7 @@ def main(opt, resume=None, domain=None, moment_mix=None):
             moment_mix_prob=0.5,
             moment_mix_bg=True,
             moment_mix_min_len=1,
+            moment_mix_num_bg_candidates = 10,
         )
     else:
         train_dataset = StartEndDataset(**dataset_config)
@@ -392,11 +393,12 @@ if __name__ == "__main__":
             "eatr",
             "cg_detr",
             "uvcom",
+            "uvcom_lad",
             "tr_detr",
             "taskweave_hd2mr",
             "taskweave_mr2hd",
         ],
-        help="model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, tr_detr, taskweave_hd2mr, taskweave_mr2hd]",
+        help="model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, uvcom_lad, tr_detr, taskweave_hd2mr, taskweave_mr2hd]",
     )
     parser.add_argument(
         "--dataset",

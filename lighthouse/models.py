@@ -6,6 +6,7 @@ from lighthouse.common.moment_detr import build_model as build_model_moment_detr
 from lighthouse.common.cg_detr import build_model as build_model_cg_detr
 from lighthouse.common.eatr import build_model as build_model_eatr
 from lighthouse.common.uvcom import build_model as build_model_uvcom
+from lighthouse.common.uvcom_lad import build_model as build_model_uvcom_lad
 from lighthouse.common.tr_detr import build_model as build_model_tr_detr
 from lighthouse.common.taskweave import build_model as build_model_task_weave
 
@@ -100,6 +101,7 @@ class BasePredictor:
             'cg_detr': build_model_cg_detr,
             'tr_detr': build_model_tr_detr,
             'uvcom': build_model_uvcom,
+            'uvcom_lad': build_model_uvcom_lad,
             'taskweave': build_model_task_weave
         }
 
@@ -108,7 +110,7 @@ class BasePredictor:
             return model
         else:
             raise NotImplementedError(f'The {model_name} is not implemented. Choose from'
-                                      '[moment_detr, qd_detr, eatr, cg_detr, tr_detr, uvcom, taskweave]')
+                                      '[moment_detr, qd_detr, eatr, cg_detr, tr_detr, uvcom, uvcom_lad, taskweave]')
 
     def _initialize_vision_encoder(
         self,
@@ -389,7 +391,18 @@ class UVCOMPredictor(BasePredictor):
         super().__init__('uvcom', ckpt_path, device,
                          feature_name, slowfast_path, pann_path)
 
-
+class UVCOMPredictor(BasePredictor):
+    def __init__(
+        self, 
+        ckpt_path: str,
+        device: str,
+        feature_name: str,
+        slowfast_path: Optional[str] = None,
+        pann_path: Optional[str] = None
+        ) -> None:
+        super().__init__('uvcom_lad', ckpt_path, device,
+                         feature_name, slowfast_path, pann_path)
+        
 class TaskWeavePredictor(BasePredictor):
     def __init__(
         self, 

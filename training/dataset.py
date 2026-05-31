@@ -322,6 +322,7 @@ class StartEndDataset(Dataset):
         moment_mix_prob=0.5,
         moment_mix_bg=True,
         moment_mix_min_len=1,
+        moment_mix_num_bg_candidates=10,
     ):
         self.dset_name = dset_name
         self.domain = domain
@@ -363,11 +364,12 @@ class StartEndDataset(Dataset):
         self.use_moment_mix = use_moment_mix
         if self.use_moment_mix:
             self.moment_mix = MomentMix(
-                epsilon_cut=moment_mix_epsilon,
-                prob=moment_mix_prob,
-                use_background_mix=moment_mix_bg,
-                min_moment_length=moment_mix_min_len,
-                clip_len=clip_len,
+                epsilon_cut = moment_mix_epsilon,
+                prob = moment_mix_prob,
+                use_background_mix = moment_mix_bg,
+                min_moment_length = moment_mix_min_len,
+                clip_len = clip_len,
+                num_bg_candidates = moment_mix_num_bg_candidates,
             )
             self._all_audio_cache = None
         else:

@@ -1,7 +1,8 @@
 model_name: uvcom
 enc_layers: 3
 dec_layers: 3
-num_queries: 30
+num_queries_per_class: 10
+num_length_classes: 3
 n_txt_mu: 5
 n_visual_mu: 30
 sim_loss_coef: 1

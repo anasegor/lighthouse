@@ -35,6 +35,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
+
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
 DETR model and criterion classes.
@@ -44,17 +45,18 @@ import torch.nn.functional as F
 from torch import nn
 
 from lighthouse.common.utils.span_utils import generalized_temporal_iou, span_cxw_to_xx
-from lighthouse.common.matcher import build_matcher
-from lighthouse.common.CIM import build_CIM
+from lighthouse.common.matcher_lad import build_matcher
+from lighthouse.common.CIM_lad import build_CIM
 from lighthouse.common.position_encoding import build_position_encoding
 from lighthouse.common.misc import accuracy
 import numpy as np
+
 
 def inverse_sigmoid(x, eps=1e-3):
     x = x.clamp(min=0, max=1)
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
-    return torch.log(x1/x2)
+    return torch.log(x1 / x2)
 
 
 def sampling(sim_intra, src_txt, src_txt_mask, epoch):
@@ -88,10 +90,25 @@ def sampling(sim_intra, src_txt, src_txt_mask, epoch):
 
 
 class UVCOM(nn.Module):
-    def __init__(self, CIM, position_embed, txt_position_embed, txt_dim, vid_dim,
-                 num_queries, input_dropout, aux_loss=False,
-                 max_v_l=75, span_loss_type="l1", use_txt_pos=False, n_input_proj=2, aud_dim=0,neg_choose_epoch=80):
-        """ Initializes the model.
+    def __init__(
+        self,
+        CIM,
+        position_embed,
+        txt_position_embed,
+        txt_dim,
+        vid_dim,
+        input_dropout,
+        num_queries_per_class=10,
+        num_length_classes=3,
+        aux_loss=False,
+        max_v_l=75,
+        span_loss_type="l1",
+        use_txt_pos=False,
+        n_input_proj=2,
+        aud_dim=0,
+        neg_choose_epoch=80,
+    ):
+        """Initializes the model.
         Parameters:
             transformer: torch module of the transformer architecture. See transformer.py
             position_embed: torch module of the position_embedding, See position_encoding.py
@@ -109,7 +126,9 @@ class UVCOM(nn.Module):
             # background_thd: float, intersection over prediction <= background_thd: labeled background
         """
         super().__init__()
-        self.num_queries = num_queries
+        self.num_length_classes = num_length_classes
+        self.num_queries_per_class = num_queries_per_class
+        self.num_queries = num_length_classes * num_queries_per_class
         self.CIM = CIM
         self.position_embed = position_embed
         # if use_txt_pos:
@@ -122,26 +141,89 @@ class UVCOM(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, 2)  # 0: background, 1: foreground
         self.use_txt_pos = use_txt_pos
         self.n_input_proj = n_input_proj
-        self.query_embed = nn.Embedding(num_queries, 2)
+        # self.query_embed = nn.Embedding(num_queries, 2)
+        self.query_coord_embed = nn.Embedding(self.num_queries, 2)
+        self.length_class_embed = nn.Embedding(num_length_classes, hidden_dim)
+        self.query_content_embed = nn.Embedding(self.num_queries, hidden_dim)
         relu_args = [True] * 3
-        relu_args[n_input_proj-1] = False
-        self.input_txt_proj = nn.Sequential(*[
-            LinearLayer(txt_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[0]),
-            LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[1]),
-            LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[2])
-        ][:n_input_proj])
-        self.input_vid_proj = nn.Sequential(*[
-            LinearLayer(vid_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[0]),
-            LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[1]),
-            LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[2])
-        ][:2])
-        
+        relu_args[n_input_proj - 1] = False
+        self.input_txt_proj = nn.Sequential(
+            *[
+                LinearLayer(
+                    txt_dim,
+                    hidden_dim,
+                    layer_norm=True,
+                    dropout=input_dropout,
+                    relu=relu_args[0],
+                ),
+                LinearLayer(
+                    hidden_dim,
+                    hidden_dim,
+                    layer_norm=True,
+                    dropout=input_dropout,
+                    relu=relu_args[1],
+                ),
+                LinearLayer(
+                    hidden_dim,
+                    hidden_dim,
+                    layer_norm=True,
+                    dropout=input_dropout,
+                    relu=relu_args[2],
+                ),
+            ][:n_input_proj]
+        )
+        self.input_vid_proj = nn.Sequential(
+            *[
+                LinearLayer(
+                    vid_dim,
+                    hidden_dim,
+                    layer_norm=True,
+                    dropout=input_dropout,
+                    relu=relu_args[0],
+                ),
+                LinearLayer(
+                    hidden_dim,
+                    hidden_dim,
+                    layer_norm=True,
+                    dropout=input_dropout,
+                    relu=relu_args[1],
+                ),
+                LinearLayer(
+                    hidden_dim,
+                    hidden_dim,
+                    layer_norm=True,
+                    dropout=input_dropout,
+                    relu=relu_args[2],
+                ),
+            ][:2]
+        )
+
         if aud_dim > 0:
-            self.input_audio_proj = nn.Sequential(*[
-            LinearLayer(aud_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[0]),
-            LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[1]),
-            LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[2])
-            ][:n_input_proj])
+            self.input_audio_proj = nn.Sequential(
+                *[
+                    LinearLayer(
+                        aud_dim,
+                        hidden_dim,
+                        layer_norm=True,
+                        dropout=input_dropout,
+                        relu=relu_args[0],
+                    ),
+                    LinearLayer(
+                        hidden_dim,
+                        hidden_dim,
+                        layer_norm=True,
+                        dropout=input_dropout,
+                        relu=relu_args[1],
+                    ),
+                    LinearLayer(
+                        hidden_dim,
+                        hidden_dim,
+                        layer_norm=True,
+                        dropout=input_dropout,
+                        relu=relu_args[2],
+                    ),
+                ][:n_input_proj]
+            )
 
         self.saliency_proj1 = nn.Linear(hidden_dim, hidden_dim)
         self.saliency_proj2 = nn.Linear(hidden_dim, hidden_dim)
@@ -152,65 +234,105 @@ class UVCOM(nn.Module):
         self.global_rep_pos = torch.nn.Parameter(torch.randn(hidden_dim))
         self.negative_choose_epoch = neg_choose_epoch
 
-    def forward(self, src_txt, src_txt_mask, src_vid, src_vid_mask, epoch=None, src_aud=None, src_aud_mask=None):
+    def forward(
+        self,
+        src_txt,
+        src_txt_mask,
+        src_vid,
+        src_vid_mask,
+        epoch=None,
+        src_aud=None,
+        src_aud_mask=None,
+    ):
         """The forward expects two tensors:
-               - src_txt: [batch_size, L_txt, D_txt]
-               - src_txt_mask: [batch_size, L_txt], containing 0 on padded pixels,
-                    will convert to 1 as padding later for transformer
-               - src_vid: [batch_size, L_vid, D_vid]
-               - src_vid_mask: [batch_size, L_vid], containing 0 on padded pixels,
-                    will convert to 1 as padding later for transformer
+           - src_txt: [batch_size, L_txt, D_txt]
+           - src_txt_mask: [batch_size, L_txt], containing 0 on padded pixels,
+                will convert to 1 as padding later for transformer
+           - src_vid: [batch_size, L_vid, D_vid]
+           - src_vid_mask: [batch_size, L_vid], containing 0 on padded pixels,
+                will convert to 1 as padding later for transformer
 
-            It returns a dict with the following elements:
-               - "pred_spans": The normalized boxes coordinates for all queries, represented as
-                               (center_x, width). These values are normalized in [0, 1],
-                               relative to the size of each individual image (disregarding possible padding).
-                               See PostProcess for information on how to retrieve the unnormalized bounding box.
-               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                                dictionnaries containing the two above keys for each decoder layer.
+        It returns a dict with the following elements:
+           - "pred_spans": The normalized boxes coordinates for all queries, represented as
+                           (center_x, width). These values are normalized in [0, 1],
+                           relative to the size of each individual image (disregarding possible padding).
+                           See PostProcess for information on how to retrieve the unnormalized bounding box.
+           - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+                            dictionnaries containing the two above keys for each decoder layer.
         """
         # import pdb;pdb.set_trace()
         src_vid = self.input_vid_proj(src_vid)
         s_p_m_aud = None
         if src_aud is not None:
             src_aud = self.input_audio_proj(src_aud)
-            src_vid = src_vid+src_aud
+            src_vid = src_vid + src_aud
         src_txt = self.input_txt_proj(src_txt)
         pos_vid = self.position_embed(src_vid, src_vid_mask)  # (bsz, L_vid, d)
-        pos_txt = self.txt_position_embed(src_txt) if self.use_txt_pos else torch.zeros_like(src_txt)  # (bsz, L_txt, d)
+        pos_txt = (
+            self.txt_position_embed(src_txt)
+            if self.use_txt_pos
+            else torch.zeros_like(src_txt)
+        )  # (bsz, L_txt, d)
         # pad zeros for txt positions
         pos = torch.cat([pos_vid, pos_txt], dim=1)
         # (#layers, bsz, #queries, d), (bsz, L_vid+L_txt, d)
         src = torch.cat([src_vid, src_txt], dim=1)  # (bsz, L_vid+L_txt, d)
-        mask = torch.cat([src_vid_mask, src_txt_mask], dim=1).bool()  # (bsz, L_vid+L_txt)
+        mask = torch.cat(
+            [src_vid_mask, src_txt_mask], dim=1
+        ).bool()  # (bsz, L_vid+L_txt)
 
         # for global token
         mask_ = torch.tensor([[True]]).to(mask.device).repeat(mask.shape[0], 1)
-        mask = torch.cat([mask_, mask], dim=1)  #(bsz, 1+L_vid+L_txt)
-        src_ = self.global_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src.shape[0], 1, 1)  #(bsz, 1, d)
-        src = torch.cat([src_, src], dim=1)   #(bsz, 1+L_vid+L_txt, d)
-        pos_ = self.global_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos.shape[0], 1, 1)
-        pos = torch.cat([pos_, pos], dim=1)  #(bsz, 1+L_vid+L_txt+1, d)
+        mask = torch.cat([mask_, mask], dim=1)  # (bsz, 1+L_vid+L_txt)
+        src_ = self.global_rep_token.reshape([1, 1, self.hidden_dim]).repeat(
+            src.shape[0], 1, 1
+        )  # (bsz, 1, d)
+        src = torch.cat([src_, src], dim=1)  # (bsz, 1+L_vid+L_txt, d)
+        pos_ = self.global_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(
+            pos.shape[0], 1, 1
+        )
+        pos = torch.cat([pos_, pos], dim=1)  # (bsz, 1+L_vid+L_txt+1, d)
 
         video_length = src_vid.shape[1]
-        
-        hs, reference, memory, memory_global,sim = self.CIM(src, ~mask, self.query_embed.weight, pos, video_length=video_length, epoch=epoch,negative_choose_epoch=self.negative_choose_epoch,aud=s_p_m_aud)
+
+        qc = self.length_class_embed.weight.repeat_interleave(self.num_queries_per_class, dim=0) # [Nq, d]
+
+        qq = self.query_content_embed.weight # [Nq, d]
+        query_content = qc + qq # [Nq, d]
+        query_content_b = query_content.unsqueeze(1).repeat(1, src_vid.shape[0], 1).permute(1, 0, 2) # [bsz, Nq, d]
+        query_coord = self.query_coord_embed.weight  # [Nq, 2]
+
+        hs, reference, memory, memory_global, sim = self.CIM(
+            src,
+            ~mask,
+            query_coord,
+            pos,
+            query_content_b,
+            video_length=video_length,
+            epoch=epoch,
+            negative_choose_epoch=self.negative_choose_epoch,
+            aud=s_p_m_aud,
+        )
         # hs (#layers, batch_size, #qeries, d)
         # reference (#layers, batch_size, #queries, 2)
 
-        outputs_class = self.class_embed(hs)  # (#layers, batch_size, #queries, #classes)
+        outputs_class = self.class_embed(
+            hs
+        )  # (#layers, batch_size, #queries, #classes)
         reference_before_sigmoid = inverse_sigmoid(reference)
         tmp = self.span_embed(hs)
         outputs_coord = tmp + reference_before_sigmoid
         if self.span_loss_type == "l1":
             outputs_coord = outputs_coord.sigmoid()
-        out = {'pred_logits': outputs_class[-1], 'pred_spans': outputs_coord[-1]}
+        out = {"pred_logits": outputs_class[-1], "pred_spans": outputs_coord[-1]}
 
-        out['sim'] = sim # list of [sim_intra,sim_inter] or [] for similarity loss calculation
+        out["sim"] = (
+            sim  # list of [sim_intra,sim_inter] or [] for similarity loss calculation
+        )
 
-        txt_mem = memory[:, src_vid.shape[1]:]  # (bsz, L_txt, d)
-        vid_mem = memory[:, :src_vid.shape[1]]  # (bsz, L_vid, d)            
-            
+        txt_mem = memory[:, src_vid.shape[1] :]  # (bsz, L_txt, d)
+        vid_mem = memory[:, : src_vid.shape[1]]  # (bsz, L_vid, d)
+
         # !!! this is code for test
         if src_txt.shape[1] == 0:
             print("There is zero text query. You should change codes properly")
@@ -233,18 +355,37 @@ class UVCOM(nn.Module):
         src_neg = torch.cat([src_, src_neg], dim=1)
         pos_neg = pos.clone()  # since it does not use actual content
 
-        _, _, memory_neg, memory_global_neg,_ = self.CIM(src_neg, ~mask_neg, self.query_embed.weight, pos_neg, video_length=video_length, epoch=epoch,negative_choose_epoch=self.negative_choose_epoch,aud=s_p_m_aud)
-        vid_mem_neg = memory_neg[:, :src_vid.shape[1]]
+        _, _, memory_neg, memory_global_neg, _ = self.CIM(
+            src_neg,
+            ~mask_neg,
+            query_coord,
+            pos_neg,
+            query_content_b,
+            video_length=video_length,
+            epoch=epoch,
+            negative_choose_epoch=self.negative_choose_epoch,
+            aud=s_p_m_aud,
+        )
+        vid_mem_neg = memory_neg[:, : src_vid.shape[1]]
 
-
-        out["saliency_scores"] = (torch.sum(self.saliency_proj1(vid_mem) * self.saliency_proj2(memory_global).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim))
-        out["saliency_scores_neg"] = (torch.sum(self.saliency_proj1(vid_mem_neg) * self.saliency_proj2(memory_global_neg).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim))
+        out["saliency_scores"] = torch.sum(
+            self.saliency_proj1(vid_mem)
+            * self.saliency_proj2(memory_global).unsqueeze(1),
+            dim=-1,
+        ) / np.sqrt(self.hidden_dim)
+        out["saliency_scores_neg"] = torch.sum(
+            self.saliency_proj1(vid_mem_neg)
+            * self.saliency_proj2(memory_global_neg).unsqueeze(1),
+            dim=-1,
+        ) / np.sqrt(self.hidden_dim)
 
         out["video_mask"] = src_vid_mask
         if self.aux_loss:
             # assert proj_queries and proj_txt_mem
-            out['aux_outputs'] = [
-                {'pred_logits': a, 'pred_spans': b} for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+            out["aux_outputs"] = [
+                {"pred_logits": a, "pred_spans": b}
+                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
+            ]
         return out
 
 
@@ -540,13 +681,15 @@ class SetCriterion(nn.Module):
 
 
 class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
+    """Very simple multi-layer perceptron (also called FFN)"""
 
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList(
+            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
+        )
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):
@@ -563,10 +706,7 @@ class LinearLayer(nn.Module):
         self.layer_norm = layer_norm
         if layer_norm:
             self.LayerNorm = nn.LayerNorm(in_hsz)
-        layers = [
-            nn.Dropout(dropout),
-            nn.Linear(in_hsz, out_hsz)
-        ]
+        layers = [nn.Dropout(dropout), nn.Linear(in_hsz, out_hsz)]
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -592,39 +732,48 @@ def build_model(args):
         txt_dim=args.t_feat_dim,
         vid_dim=args.v_feat_dim,
         aud_dim=args.a_feat_dim if "a_feat_dim" in args else 0,
-        num_queries=args.num_queries,
         input_dropout=args.input_dropout,
+        num_queries_per_class=args.num_queries_per_class,
+        num_length_classes=args.num_length_classes,
         aux_loss=args.aux_loss,
         span_loss_type=args.span_loss_type,
         n_input_proj=args.n_input_proj,
-        neg_choose_epoch=args.neg_choose_epoch
+        neg_choose_epoch=args.neg_choose_epoch,
     )
 
     matcher = build_matcher(args)
-    weight_dict = {"loss_span": args.span_loss_coef,
-                   "loss_giou": args.giou_loss_coef,
-                   "loss_label": args.label_loss_coef,
-                   "loss_saliency": args.lw_saliency} 
+    weight_dict = {
+        "loss_span": args.span_loss_coef,
+        "loss_giou": args.giou_loss_coef,
+        "loss_label": args.label_loss_coef,
+        "loss_saliency": args.lw_saliency,
+    }
 
     if args.aux_loss:
         aux_weight_dict = {}
         for i in range(args.dec_layers - 1):
-            aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items() if k != "loss_saliency"})
+            aux_weight_dict.update(
+                {k + f"_{i}": v for k, v in weight_dict.items() if k != "loss_saliency"}
+            )
         weight_dict.update(aux_weight_dict)
 
-    losses = ['spans', 'labels', 'saliency']
+    losses = ["spans", "labels", "saliency"]
     if args.sim_loss_coef != 0:
         weight_dict["loss_sim"] = args.sim_loss_coef
         losses.append("similarity")
-        
+
     # For tvsum dataset
-    use_matcher = not (args.dset_name == 'tvsum')
-        
+    use_matcher = not (args.dset_name == "tvsum")
+
     criterion = SetCriterion(
-        matcher=matcher, weight_dict=weight_dict, losses=losses,
+        matcher=matcher,
+        weight_dict=weight_dict,
+        losses=losses,
         eos_coef=args.eos_coef,
-        span_loss_type=args.span_loss_type, max_v_l=args.max_v_l,
-        saliency_margin=args.saliency_margin, use_matcher=use_matcher,
+        span_loss_type=args.span_loss_type,
+        max_v_l=args.max_v_l,
+        saliency_margin=args.saliency_margin,
+        use_matcher=use_matcher,
     )
 
     criterion.to(device)

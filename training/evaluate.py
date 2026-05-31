@@ -75,6 +75,7 @@ from lighthouse.common.cg_detr import build_model as build_model_cg_detr
 from lighthouse.common.eatr import build_model as build_model_eatr
 from lighthouse.common.tr_detr import build_model as build_model_tr_detr
 from lighthouse.common.uvcom import build_model as build_model_uvcom
+from lighthouse.common.uvcom_lad import build_model as build_model_uvcom_lad
 from lighthouse.common.taskweave import build_model as build_model_task_weave
 
 import logging
@@ -501,6 +502,8 @@ def build_model(opt):
         model, criterion = build_model_tr_detr(opt)
     elif opt.model_name == "uvcom":
         model, criterion = build_model_uvcom(opt)
+    elif opt.model_name == "uvcom_lad":
+        model, criterion = build_model_uvcom_lad(opt)
     elif opt.model_name == "taskweave":
         model, criterion = build_model_task_weave(opt)
     else:
@@ -639,11 +642,12 @@ if __name__ == "__main__":
             "eatr",
             "cg_detr",
             "uvcom",
+            "uvcom_lad",
             "tr_detr",
             "taskweave_hd2mr",
             "taskweave_mr2hd",
         ],
-        help="model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, tr_detr, taskweave_hd2mr, taskweave_mr2hd]",
+        help="model name. select from [moment_detr, qd_detr, eatr, cg_detr, uvcom, uvcom_lad, tr_detr, taskweave_hd2mr, taskweave_mr2hd]",
     )
     parser.add_argument(
         "--dataset",
