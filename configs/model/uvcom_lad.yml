@@ -1,4 +1,4 @@
-model_name: uvcom
+model_name: uvcom_lad
 enc_layers: 3
 dec_layers: 3
 num_queries_per_class: 10
