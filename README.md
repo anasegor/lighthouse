@@ -17,3 +17,17 @@ python training/evaluate.py --model uvcom --dataset castella --feature clap --sp
 - Визуализация loss и метрик utils/plot_loss.py utils/plot_val_metrics.py из train.json и val.json файлов, полученных при обучении модели.
 
 [Чекпоинты для моделей uvcom и uvcom_lad ](https://drive.google.com/drive/folders/1PwyUKxvgZV5ENpXK4HbWiwUbURJecqSe?usp=sharing) 
+
+Метрики на CASTELLA:
+
+| Method | R@1, 0.5 | R@1, 0.7 | mAP@avg | mAP@0.5 | mAP@0.75 |
+|--------|----------|----------|---------|---------|----------|
+| UVCOM base | 31.7 | 20.3 | 15.9 | 28.4 | 15.2 |
+| UVCOM LAD 3 class [0.05, 0.2] + MomentMix * + Query | 34.7 (+9.4%) | 22.1 (+8.8%) | 18.0 (+13.2%) | 30.6 (+7.7%) | 17.4 (+17.1%) |
+
+Метрики на UnAV-100 subset:
+
+| Method | R@1, 0.5 | R@1, 0.7 | mAP@avg | mAP@0.5 | mAP@0.75 |
+|--------|----------|----------|---------|---------|----------|
+| UVCOM base | 54.0 | 46.0 | 41.6 | 61.5 | 44.5 |
+| UVCOM LAD 3 class [0.05, 0.2] + MomentMix * + Query | 57.0 (+5.6%) | 47.0 (+2.2%) | 45.7 (+9.9%) | 65.6 (+6.7%) | 48.4 (+8.8%) |
